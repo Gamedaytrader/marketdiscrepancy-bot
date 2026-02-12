@@ -23,8 +23,8 @@ CONFIRM_PCT = 0.05
 SETUP_EXPIRY = 60 * 60
 WINDOW_SIZE = 5
 
-KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY_ID")
-KALSHI_API_SECRET = os.environ.get("KALSHI_PRIVATE_KEY")  # base64
+KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY")
+KALSHI_API_SECRET = os.environ.get("KALSHI_API_SECRET")  # base64
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
