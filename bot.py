@@ -118,6 +118,7 @@ async def fetch_polymarket(session):
 
     except Exception as e:
         print("Polymarket error:", e)
+        print("Polymarket raw count:", len(data))
 
     return markets
 
@@ -154,6 +155,7 @@ async def fetch_kalshi(session):
 
     except Exception as e:
         print("Kalshi exception:", e)
+        print("Kalshi raw:", payload)
 
     return markets
 
