@@ -30,14 +30,39 @@ async def polymarket_loop():
         print(f"\n[Polymarket] Pulled {len(markets)} markets")
 
         # Log a few sample markets so we know it works
-        for m in markets[:5]:
-            question = m.get("question")
-            yes_price = m.get("yes_price")
-            liquidity = m.get("liquidity")
+       shown = 0
 
-            print(
-                f"[Polymarket] {question} | YES: {yes_price} | Liquidity: {liquidity}"
-            )
+for m in markets:
+    outcomes = m.get("outcomes", [])
+
+    # Only binary markets
+    if len(outcomes) != 2:
+        continue
+
+    yes_outcome = next(
+        (o for o in outcomes if o.get("name", "").upper() == "YES"),
+        None
+    )
+
+    if not yes_outcome:
+        continue
+
+    best_bid = yes_outcome.get("bestBid")
+    best_ask = yes_outcome.get("bestAsk")
+
+    if best_bid is None or best_ask is None:
+        continue
+
+    yes_prob = (best_bid + best_ask) / 2
+
+    print(
+        f"[Polymarket] {m.get('question')} | YES ≈ {yes_prob:.2%}"
+    )
+
+    shown += 1
+    if shown >= 5:
+        break
+
 
         # wait 10 minutes
         await asyncio.sleep(600)
