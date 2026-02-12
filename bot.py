@@ -3,18 +3,21 @@ import asyncio
 import aiohttp
 import os
 
+# ------------------ Config ------------------ #
+
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 CHANNEL_ID = 1471542780605239358
 
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
-FETCH_INTERVAL = 600  # seconds
+
+FETCH_INTERVAL = 600          # seconds (10 minutes)
+DISCREPANCY_THRESHOLD = 0.10  # 10%
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-
-# ---------- Polymarket ---------- #
+# ------------------ Polymarket ------------------ #
 
 async def fetch_polymarket_markets(session):
     try:
@@ -27,7 +30,7 @@ async def fetch_polymarket_markets(session):
         return []
 
 
-def extract_binary_yes_prob(market):
+def extract_polymarket_yes_prob(market):
     outcomes = market.get("outcomes", [])
     if len(outcomes) != 2:
         return None
@@ -42,7 +45,7 @@ def extract_binary_yes_prob(market):
     return None
 
 
-# ---------- Manifold ---------- #
+# ------------------ Manifold ------------------ #
 
 async def fetch_manifold_markets(session):
     try:
@@ -56,6 +59,7 @@ async def fetch_manifold_markets(session):
 
 def build_manifold_lookup(markets):
     lookup = {}
+
     for m in markets:
         if m.get("outcomeType") != "BINARY":
             continue
@@ -69,26 +73,26 @@ def build_manifold_lookup(markets):
     return lookup
 
 
-# ---------- Matching Logic ---------- #
+# ------------------ Matching ------------------ #
 
 def find_manifold_prob(poly_question, manifold_lookup):
-    q = poly_question.lower()
-    for m_q, prob in manifold_lookup.items():
-        if q in m_q or m_q in q:
+    pq = poly_question.lower()
+    for mq, prob in manifold_lookup.items():
+        if pq in mq or mq in pq:
             return prob
     return None
 
 
-# ---------- Main Loop ---------- #
+# ------------------ Main Loop ------------------ #
 
 async def market_loop():
     await client.wait_until_ready()
 
     async with aiohttp.ClientSession() as session:
         while not client.is_closed():
+
             poly_markets = await fetch_polymarket_markets(session)
             manifold_markets = await fetch_manifold_markets(session)
-
             manifold_lookup = build_manifold_lookup(manifold_markets)
 
             print(
@@ -96,33 +100,45 @@ async def market_loop():
                 f"Manifold: {len(manifold_lookup)}"
             )
 
-            shown = 0
+            discrepancies = []
 
-            for m in poly_markets:
-                poly_prob = extract_binary_yes_prob(m)
+            for market in poly_markets:
+                poly_prob = extract_polymarket_yes_prob(market)
                 if poly_prob is None:
                     continue
 
-                question = m.get("question", "")
+                question = market.get("question", "")
                 manifold_prob = find_manifold_prob(question, manifold_lookup)
-
                 if manifold_prob is None:
                     continue
 
-                print(
-                    f"\n[Match] {question}\n"
-                    f"  Polymarket YES ≈ {poly_prob:.2%}\n"
-                    f"  Manifold   YES ≈ {manifold_prob:.2%}"
-                )
+                spread = manifold_prob - poly_prob
 
-                shown += 1
-                if shown >= 3:
-                    break
+                if abs(spread) >= DISCREPANCY_THRESHOLD:
+                    discrepancies.append({
+                        "question": question,
+                        "poly": poly_prob,
+                        "manifold": manifold_prob,
+                        "spread": spread
+                    })
+
+            # Rank by absolute disagreement
+            discrepancies.sort(key=lambda x: abs(x["spread"]), reverse=True)
+
+            # Log top discrepancies
+            for d in discrepancies[:5]:
+                print(
+                    f"\n[DISCREPANCY]\n"
+                    f"{d['question']}\n"
+                    f"  Polymarket YES ≈ {d['poly']:.2%}\n"
+                    f"  Manifold   YES ≈ {d['manifold']:.2%}\n"
+                    f"  Spread     ≈ {d['spread']:+.2%}"
+                )
 
             await asyncio.sleep(FETCH_INTERVAL)
 
 
-# ---------- Discord ---------- #
+# ------------------ Discord ------------------ #
 
 @client.event
 async def on_ready():
