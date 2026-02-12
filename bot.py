@@ -16,7 +16,7 @@ MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
 FETCH_INTERVAL = 600          # 10 minutes
 DISCREPANCY_THRESHOLD = 0.05  # 5%
-LIQUIDITY_DELTA_THRESHOLD = 5_000  # $5k
+LIQUIDITY_DELTA_THRESHOLD = 3_000  # $3k
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
