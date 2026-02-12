@@ -11,9 +11,9 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
 
-FETCH_INTERVAL = 600  # 10 minutes
+FETCH_INTERVAL = 120  # 2 minutes
 
-ALERT_THRESHOLD = 10_000
+ALERT_THRESHOLD = 3_000
 WHALE_THRESHOLD = 20_000
 CONFIRM_PCT = 0.05           # 5% price move
 SETUP_EXPIRY = 60 * 60       # 1 hour
