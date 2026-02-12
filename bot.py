@@ -3,34 +3,52 @@ import asyncio
 import aiohttp
 import os
 import time
-import hmac
-import hashlib
-import base64
 
 # ================== CONFIG ================== #
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
-MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
-FETCH_INTERVAL = 600          # 10 minutes
-DISCREPANCY_THRESHOLD = 0.05  # 5%
-LIQUIDITY_DELTA_THRESHOLD = 3_000  # $3k
+FETCH_INTERVAL = 600  # 10 minutes
+
+ALERT_THRESHOLD = 10_000
+WHALE_THRESHOLD = 20_000
+CONFIRM_PCT = 0.05           # 5% price move
+SETUP_EXPIRY = 60 * 60       # 1 hour
+WINDOW_SIZE = 5              # rolling liquidity window
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 # ================== STATE ================== #
 
-# market_id -> {"liquidity": float, "prob": float}
-polymarket_liquidity_cache = {}
+polymarket_cache = {}        # market_id -> {liquidity, prob}
+liquidity_windows = {}       # market_id -> [deltas]
+open_setups = {}             # market_id -> setup object
+
+# ================== DISCORD WEBHOOK ================== #
+
+async def send_discord(title, market, lines, color):
+    payload = {
+        "embeds": [{
+            "title": title,
+            "description": f"**Market:** {market}\n\n" + "\n".join(lines),
+            "color": color,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        }]
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(DISCORD_WEBHOOK_URL, json=payload):
+            pass
 
 # ================== POLYMARKET ================== #
 
 async def fetch_polymarket_markets(session):
     try:
-        async with session.get(POLYMARKET_URL, timeout=10) as resp:
+        async with session.get(POLYMARKET_URL, timeout=15) as resp:
             resp.raise_for_status()
             payload = await resp.json()
             return payload.get("data", [])
@@ -38,68 +56,106 @@ async def fetch_polymarket_markets(session):
         print(f"[Polymarket] Fetch error: {e}")
         return []
 
-
-def extract_polymarket_yes_prob(market):
-    outcomes = market.get("outcomes", [])
-    if len(outcomes) != 2:
-        return None
-
-    for o in outcomes:
+def extract_yes_prob(market):
+    for o in market.get("outcomes", []):
         if o.get("name", "").upper() == "YES":
             bid = o.get("bestBid")
             ask = o.get("bestAsk")
             if bid is not None and ask is not None:
                 return (bid + ask) / 2
-
     return None
 
-# ================== MANIFOLD ================== #
+# ================== LIQUIDITY UTILS ================== #
 
-async def fetch_manifold_markets(session):
-    try:
-        async with session.get(MANIFOLD_URL, timeout=10) as resp:
-            resp.raise_for_status()
-            return await resp.json()
-    except Exception as e:
-        print(f"[Manifold] Fetch error: {e}")
-        return []
+def track_liquidity(market_id, delta):
+    window = liquidity_windows.setdefault(market_id, [])
+    window.append(delta)
+    if len(window) > WINDOW_SIZE:
+        window.pop(0)
 
+def net_liquidity(market_id):
+    return sum(liquidity_windows.get(market_id, []))
 
-def build_manifold_lookup(markets):
-    lookup = {}
-    for m in markets:
-        if m.get("outcomeType") != "BINARY":
-            continue
+# ================== SETUP ================== #
 
-        q = m.get("question", "").lower()
-        p = m.get("probability")
+async def maybe_trigger_setup(market_id, question, net_delta, yes_price):
+    if abs(net_delta) < ALERT_THRESHOLD:
+        return
+    if market_id in open_setups:
+        return
 
-        if q and p is not None:
-            lookup[q] = p
+    whale = abs(net_delta) >= WHALE_THRESHOLD
+    pulled = net_delta < 0
 
-    return lookup
+    action_side = "NO" if pulled else "YES"
+    action_price = (1 - yes_price) if pulled else yes_price
 
+    open_setups[market_id] = {
+        "side": action_side,
+        "entry": action_price,
+        "timestamp": time.time(),
+        "confirmed": False
+    }
 
-def find_manifold_prob(question, lookup):
-    q = question.lower()
-    for mq, prob in lookup.items():
-        if q in mq or mq in q:
-            return prob
-    return None
-
-# ================== LIQUIDITY LOGGING ================== #
-
-def log_liquidity_delta(question, delta_liq, old_prob, new_prob):
-    price_delta = None
-    if old_prob is not None and new_prob is not None:
-        price_delta = new_prob - old_prob
-
-    print(
-        f"\n[LIQUIDITY]\n"
-        f"{question}\n"
-        f"  Liquidity Δ ≈ ${delta_liq:,.0f}\n"
-        f"  Price Δ     ≈ {price_delta:+.2%}" if price_delta is not None else ""
+    await send_discord(
+        title=f"💧 Sharp Liquidity Move{' 🐋' if whale else ''}",
+        market=question,
+        lines=[
+            f"{'🔴' if pulled else '🟢'} ${abs(net_delta):,.0f} {'pulled' if pulled else 'added'}",
+            "📌 Liquidity moved first",
+            "",
+            f"🎯 Action: Buy {action_side} @ {action_price:.2f}"
+        ],
+        color=0xe74c3c if pulled else 0x2ecc71
     )
+
+# ================== FOLLOW UPS ================== #
+
+async def check_followups(market_id, question, yes_price):
+    setup = open_setups.get(market_id)
+    if not setup:
+        return
+
+    now = time.time()
+
+    # TIMEOUT
+    if now - setup["timestamp"] > SETUP_EXPIRY:
+        await send_discord(
+            title="❌ INVALIDATED",
+            market=question,
+            lines=["Timed out with no price reaction"],
+            color=0x95a5a6
+        )
+        del open_setups[market_id]
+        return
+
+    current_price = yes_price if setup["side"] == "YES" else (1 - yes_price)
+    move_pct = (current_price - setup["entry"]) / setup["entry"]
+
+    # CONFIRMED
+    if not setup["confirmed"] and move_pct >= CONFIRM_PCT:
+        setup["confirmed"] = True
+        await send_discord(
+            title="✅ CONFIRMED: Price Reacting",
+            market=question,
+            lines=[
+                f"{setup['side']}: {setup['entry']:.2f} → {current_price:.2f}",
+                f"📈 {move_pct*100:.1f}%",
+                "",
+                "🧠 Liquidity led. Market followed."
+            ],
+            color=0xf1c40f
+        )
+
+    # LIQUIDITY REVERSAL
+    if abs(net_liquidity(market_id)) < ALERT_THRESHOLD:
+        await send_discord(
+            title="❌ INVALIDATED",
+            market=question,
+            lines=["Liquidity reversed before confirmation"],
+            color=0x95a5a6
+        )
+        del open_setups[market_id]
 
 # ================== MAIN LOOP ================== #
 
@@ -108,79 +164,42 @@ async def market_loop():
 
     async with aiohttp.ClientSession() as session:
         while not client.is_closed():
+            markets = await fetch_polymarket_markets(session)
 
-            poly_markets = await fetch_polymarket_markets(session)
-            manifold_markets = await fetch_manifold_markets(session)
-
-            manifold_lookup = build_manifold_lookup(manifold_markets)
-
-            print(
-                f"\n[Markets] "
-                f"Polymarket: {len(poly_markets)} | "
-                f"Manifold: {len(manifold_lookup)}"
-            )
-
-            discrepancies = []
-
-            for m in poly_markets:
+            for m in markets:
                 market_id = m.get("id")
                 question = m.get("question", "")
                 liquidity = m.get("liquidity")
 
-                poly_prob = extract_polymarket_yes_prob(m)
-                if poly_prob is None:
+                yes_prob = extract_yes_prob(m)
+                if market_id is None or liquidity is None or yes_prob is None:
                     continue
 
-                # -------- Liquidity delta tracking -------- #
+                prev = polymarket_cache.get(market_id)
 
-                if market_id and liquidity is not None:
-                    prev = polymarket_liquidity_cache.get(market_id)
+                if prev:
+                    delta = liquidity - prev["liquidity"]
+                    track_liquidity(market_id, delta)
 
-                    if prev:
-                        old_liq = prev["liquidity"]
-                        old_prob = prev["prob"]
+                    net_delta = net_liquidity(market_id)
 
-                        delta = liquidity - old_liq
+                    await maybe_trigger_setup(
+                        market_id,
+                        question,
+                        net_delta,
+                        yes_prob
+                    )
 
-                        if delta >= LIQUIDITY_DELTA_THRESHOLD:
-                            log_liquidity_delta(
-                                question=question,
-                                delta_liq=delta,
-                                old_prob=old_prob,
-                                new_prob=poly_prob
-                            )
+                    await check_followups(
+                        market_id,
+                        question,
+                        yes_prob
+                    )
 
-                    polymarket_liquidity_cache[market_id] = {
-                        "liquidity": liquidity,
-                        "prob": poly_prob
-                    }
-
-                # -------- Consensus deviation (Poly vs Manifold) -------- #
-
-                manifold_prob = find_manifold_prob(question, manifold_lookup)
-                if manifold_prob is None:
-                    continue
-
-                spread = manifold_prob - poly_prob
-
-                if abs(spread) >= DISCREPANCY_THRESHOLD:
-                    discrepancies.append({
-                        "question": question,
-                        "poly": poly_prob,
-                        "manifold": manifold_prob,
-                        "spread": spread
-                    })
-
-            discrepancies.sort(key=lambda x: abs(x["spread"]), reverse=True)
-
-            for d in discrepancies[:5]:
-                print(
-                    f"\n[DISCREPANCY]\n"
-                    f"{d['question']}\n"
-                    f"  Polymarket ≈ {d['poly']:.2%}\n"
-                    f"  Manifold   ≈ {d['manifold']:.2%}\n"
-                    f"  Spread     ≈ {d['spread']:+.2%}"
-                )
+                polymarket_cache[market_id] = {
+                    "liquidity": liquidity,
+                    "prob": yes_prob
+                }
 
             await asyncio.sleep(FETCH_INTERVAL)
 
@@ -190,6 +209,5 @@ async def market_loop():
 async def on_ready():
     print(f"Logged in as {client.user}")
     client.loop.create_task(market_loop())
-
 
 client.run(DISCORD_TOKEN)
