@@ -202,6 +202,19 @@ async def market_loop():
                 }
 
             await asyncio.sleep(FETCH_INTERVAL)
+        @client.event
+async def on_ready():
+    print(f"Logged in as {client.user}")
+
+    await send_discord(
+        title="🧪 TEST ALERT",
+        market="System Check",
+        lines=["If you see this, webhooks are working"],
+        color=0x3498db
+    )
+
+    client.loop.create_task(market_loop())
+
 
 # ================== DISCORD ================== #
 
