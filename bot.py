@@ -12,7 +12,7 @@ import base64
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-POLYMARKET_URL = "https://clob.polymarket.com/markets?active=true&closed=false"
+POLYMARKET_URL = "https://clob.polymarket.com/markets?limit=500"
 KALSHI_BASE_URL = "https://api.kalshi.com/trade-api/v2"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
@@ -20,8 +20,6 @@ FETCH_INTERVAL = 120
 
 ALERT_THRESHOLD = 500
 WHALE_THRESHOLD = 20_000
-CONFIRM_PCT = 0.05
-SETUP_EXPIRY = 60 * 60
 WINDOW_SIZE = 5
 
 KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY")
@@ -41,7 +39,7 @@ open_setups = {}
 def safe_float(v):
     try:
         return float(v)
-    except (TypeError, ValueError):
+    except:
         return None
 
 # ================== DISCORD ================== #
@@ -59,26 +57,6 @@ async def send_discord(title, market, lines, color):
     async with aiohttp.ClientSession() as session:
         await session.post(DISCORD_WEBHOOK_URL, json=payload)
 
-# ================== KALSHI AUTH ================== #
-
-def kalshi_headers(method: str, path: str):
-    timestamp = str(int(time.time() * 1000))
-    message = f"{timestamp}{method.upper()}{path}"
-
-    secret = base64.b64decode(KALSHI_API_SECRET.strip().encode("ascii"))
-
-    signature = hmac.new(
-        secret,
-        message.encode("utf-8"),
-        hashlib.sha256
-    ).digest()
-
-    return {
-        "KALSHI-ACCESS-KEY": KALSHI_API_KEY,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
-        "KALSHI-ACCESS-TIMESTAMP": timestamp
-    }
-
 # ================== POLYMARKET ================== #
 
 async def fetch_polymarket(session):
@@ -88,28 +66,36 @@ async def fetch_polymarket(session):
         async with session.get(POLYMARKET_URL, timeout=15) as resp:
             payload = await resp.json()
 
-        if not isinstance(payload, list):
-            print("Polymarket unexpected format")
+        # Handle both response shapes
+        if isinstance(payload, dict):
+            data = payload.get("data", [])
+        elif isinstance(payload, list):
+            data = payload
+        else:
+            print("Polymarket unknown structure:", type(payload))
             return []
 
-        for m in payload:
-            question = m.get("question")
+        for m in data:
             liquidity = safe_float(m.get("liquidity"))
+            question = m.get("question")
 
             outcomes = m.get("outcomes", [])
-            if not outcomes:
-                continue
+            yes_prob = None
 
-            # Many markets now store direct price
-            yes_price = safe_float(outcomes[0].get("price"))
+            for o in outcomes:
+                if o.get("name", "").upper() == "YES":
+                    bid = safe_float(o.get("bestBid"))
+                    ask = safe_float(o.get("bestAsk"))
+                    if bid is not None and ask is not None:
+                        yes_prob = (bid + ask) / 2
 
-            if liquidity is not None and yes_price is not None:
+            if liquidity is not None and yes_prob is not None:
                 markets.append({
                     "key": f"poly|{m.get('id')}",
                     "platform": "Polymarket",
                     "question": question,
                     "liquidity": liquidity,
-                    "prob": yes_price
+                    "prob": yes_prob
                 })
 
     except Exception as e:
@@ -121,15 +107,33 @@ async def fetch_polymarket(session):
 
 async def fetch_kalshi(session):
     markets = []
+
+    if not KALSHI_API_KEY or not KALSHI_API_SECRET:
+        return []
+
     path = "/markets"
     url = f"{KALSHI_BASE_URL}{path}"
 
     try:
-        headers = kalshi_headers("GET", path)
+        timestamp = str(int(time.time() * 1000))
+        message = f"{timestamp}GET{path}"
+
+        secret = base64.b64decode(KALSHI_API_SECRET.strip().encode("ascii"))
+        signature = hmac.new(
+            secret,
+            message.encode("utf-8"),
+            hashlib.sha256
+        ).digest()
+
+        headers = {
+            "KALSHI-ACCESS-KEY": KALSHI_API_KEY,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
+            "KALSHI-ACCESS-TIMESTAMP": timestamp
+        }
 
         async with session.get(url, headers=headers, params={"limit": 200}) as resp:
             if resp.status != 200:
-                print("Kalshi error:", resp.status, await resp.text())
+                print("Kalshi HTTP error:", resp.status)
                 return []
 
             payload = await resp.json()
@@ -138,7 +142,6 @@ async def fetch_kalshi(session):
             liquidity = safe_float(m.get("liquidity"))
             yes_bid = safe_float(m.get("yes_bid"))
 
-            # Kalshi prices are in cents
             if liquidity is not None and yes_bid is not None:
                 markets.append({
                     "key": f"kalshi|{m.get('ticker')}",
@@ -149,7 +152,8 @@ async def fetch_kalshi(session):
                 })
 
     except Exception as e:
-        print("Kalshi exception:", e)
+        print("Kalshi disabled (network issue):", e)
+        return []
 
     return markets
 
@@ -166,15 +170,15 @@ async def fetch_manifold(session):
             if m.get("isResolved"):
                 continue
 
-            volume_24h = safe_float(m.get("volume24Hours"))
+            liquidity = safe_float(m.get("volume24Hours"))
             prob = safe_float(m.get("probability"))
 
-            if volume_24h is not None and prob is not None:
+            if liquidity is not None and prob is not None:
                 markets.append({
                     "key": f"manifold|{m.get('id')}",
                     "platform": "Manifold",
                     "question": m.get("question"),
-                    "liquidity": volume_24h,
+                    "liquidity": liquidity,
                     "prob": prob
                 })
 
@@ -194,37 +198,6 @@ def track_liquidity(key, delta):
 def net_liquidity(key):
     return sum(liquidity_windows.get(key, []))
 
-# ================== SETUP ================== #
-
-async def maybe_trigger_setup(market, net_delta):
-    if abs(net_delta) < ALERT_THRESHOLD:
-        return
-    if market["key"] in open_setups:
-        return
-
-    whale = abs(net_delta) >= WHALE_THRESHOLD
-    pulled = net_delta < 0
-
-    side = "NO" if pulled else "YES"
-    entry = (1 - market["prob"]) if pulled else market["prob"]
-
-    open_setups[market["key"]] = {
-        "side": side,
-        "entry": entry,
-        "timestamp": time.time(),
-        "confirmed": False
-    }
-
-    await send_discord(
-        title=f"💧 {market['platform']} Sharp Liquidity{' 🐋' if whale else ''}",
-        market=market["question"],
-        lines=[
-            f"{'🔴' if pulled else '🟢'} ${abs(net_delta):,.0f} {'pulled' if pulled else 'added'}",
-            f"🎯 Action: Buy {side} @ {entry:.2f}"
-        ],
-        color=0xe74c3c if pulled else 0x2ecc71
-    )
-
 # ================== MAIN LOOP ================== #
 
 async def market_loop():
@@ -235,20 +208,6 @@ async def market_loop():
             poly = await fetch_polymarket(session)
             kalshi = await fetch_kalshi(session)
             manifold = await fetch_manifold(session)
-
-            for m in poly + kalshi + manifold:
-                key = m["key"]
-                prev = market_cache.get(key)
-
-                if prev:
-                    delta = m["liquidity"] - prev["liquidity"]
-                    track_liquidity(key, delta)
-                    await maybe_trigger_setup(m, net_liquidity(key))
-
-                market_cache[key] = {
-                    "liquidity": m["liquidity"],
-                    "prob": m["prob"]
-                }
 
             print(
                 f"[Markets] "
