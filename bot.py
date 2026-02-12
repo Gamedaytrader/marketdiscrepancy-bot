@@ -15,11 +15,12 @@ async def fetch_polymarket():
     try:
         r = requests.get(POLYMARKET_URL, timeout=10)
         r.raise_for_status()
-        data = r.json()
-        return data
+        payload = r.json()
+        return payload.get("data", [])
     except Exception as e:
         print(f"[Polymarket] Error fetching data: {e}")
         return []
+
 
 async def polymarket_loop():
     await client.wait_until_ready()
