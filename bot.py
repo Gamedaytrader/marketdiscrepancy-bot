@@ -36,6 +36,14 @@ market_cache = {}
 liquidity_windows = {}
 open_setups = {}
 
+# ================== UTIL ================== #
+
+def safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 # ================== DISCORD ================== #
 
 async def send_discord(title, market, lines, color):
@@ -76,29 +84,32 @@ def kalshi_headers(method: str, path: str):
 
 async def fetch_polymarket(session):
     markets = []
+
     try:
         async with session.get(POLYMARKET_URL, timeout=15) as resp:
             payload = await resp.json()
 
         for m in payload.get("data", []):
-            liquidity = m.get("liquidity")
+            liquidity = safe_float(m.get("liquidity"))
             question = m.get("question")
 
             yes_prob = None
             for o in m.get("outcomes", []):
                 if o.get("name", "").upper() == "YES":
-                    bid, ask = o.get("bestBid"), o.get("bestAsk")
-                    if bid and ask:
+                    bid = safe_float(o.get("bestBid"))
+                    ask = safe_float(o.get("bestAsk"))
+                    if bid is not None and ask is not None:
                         yes_prob = (bid + ask) / 2
 
-            if liquidity and yes_prob:
+            if liquidity is not None and yes_prob is not None:
                 markets.append({
                     "key": f"poly|{m.get('id')}",
                     "platform": "Polymarket",
                     "question": question,
-                    "liquidity": float(liquidity),
-                    "prob": float(yes_prob)
+                    "liquidity": liquidity,
+                    "prob": yes_prob
                 })
+
     except Exception as e:
         print("Polymarket error:", e)
 
@@ -118,20 +129,22 @@ async def fetch_kalshi(session):
             if resp.status != 200:
                 print("Kalshi error:", resp.status, await resp.text())
                 return []
+
             payload = await resp.json()
 
         for m in payload.get("markets", []):
-            yes_price = m.get("yes_price")
-            volume = m.get("volume")
+            yes_price = safe_float(m.get("yes_price"))
+            volume = safe_float(m.get("volume"))
 
-            if yes_price and volume:
+            if yes_price is not None and volume is not None:
                 markets.append({
                     "key": f"kalshi|{m.get('id')}",
                     "platform": "Kalshi",
                     "question": m.get("title"),
-                    "liquidity": float(volume),
-                    "prob": float(yes_price)
+                    "liquidity": volume,
+                    "prob": yes_price
                 })
+
     except Exception as e:
         print("Kalshi exception:", e)
 
@@ -141,28 +154,31 @@ async def fetch_kalshi(session):
 
 async def fetch_manifold(session):
     markets = []
+
     try:
         async with session.get(f"{MANIFOLD_URL}?limit=200", timeout=15) as resp:
             if resp.status != 200:
                 print("Manifold error:", resp.status, await resp.text())
                 return []
+
             payload = await resp.json()
 
         for m in payload:
             if m.get("isResolved"):
                 continue
 
-            volume_24h = m.get("volume24Hours")
-            prob = m.get("probability")
+            volume_24h = safe_float(m.get("volume24Hours"))
+            prob = safe_float(m.get("probability"))
 
-            if volume_24h and prob:
+            if volume_24h is not None and prob is not None:
                 markets.append({
                     "key": f"manifold|{m.get('id')}",
                     "platform": "Manifold",
                     "question": m.get("question"),
-                    "liquidity": float(volume_24h),
-                    "prob": float(prob)
+                    "liquidity": volume_24h,
+                    "prob": prob
                 })
+
     except Exception as e:
         print("Manifold exception:", e)
 
@@ -267,7 +283,12 @@ async def market_loop():
                     "prob": m["prob"]
                 }
 
-            print(f"[Markets] Poly: {len(poly)} | Kalshi: {len(kalshi)} | Manifold: {len(manifold)}")
+            print(
+                f"[Markets] "
+                f"Poly: {len(poly)} | "
+                f"Kalshi: {len(kalshi)} | "
+                f"Manifold: {len(manifold)}"
+            )
 
             await asyncio.sleep(FETCH_INTERVAL)
 
