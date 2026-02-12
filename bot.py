@@ -2,31 +2,38 @@ import discord
 import asyncio
 import aiohttp
 import os
+import time
+import hmac
+import hashlib
+import base64
 
-# ------------------ Config ------------------ #
+# ------------------ CONFIG ------------------ #
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
-CHANNEL_ID = 1471542780605239358
 
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
+KALSHI_BASE_URL = "https://trading-api.kalshi.com"
 
-FETCH_INTERVAL = 600          # seconds (10 minutes)
-DISCREPANCY_THRESHOLD = 0.03  # 3%
+KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY")
+KALSHI_API_SECRET = os.environ.get("KALSHI_API_SECRET")
+
+FETCH_INTERVAL = 600          # 10 minutes
+DISCREPANCY_THRESHOLD = 0.05  # 5%
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-# ------------------ Polymarket ------------------ #
+# ------------------ POLYMARKET ------------------ #
 
 async def fetch_polymarket_markets(session):
     try:
         async with session.get(POLYMARKET_URL, timeout=10) as resp:
             resp.raise_for_status()
-            payload = await resp.json()
-            return payload.get("data", [])
+            data = await resp.json()
+            return data.get("data", [])
     except Exception as e:
-        print(f"[Polymarket] Fetch error: {e}")
+        print(f"[Polymarket] Error: {e}")
         return []
 
 
@@ -35,17 +42,15 @@ def extract_polymarket_yes_prob(market):
     if len(outcomes) != 2:
         return None
 
-    for outcome in outcomes:
-        if outcome.get("name", "").upper() == "YES":
-            bid = outcome.get("bestBid")
-            ask = outcome.get("bestAsk")
+    for o in outcomes:
+        if o.get("name", "").upper() == "YES":
+            bid = o.get("bestBid")
+            ask = o.get("bestAsk")
             if bid is not None and ask is not None:
                 return (bid + ask) / 2
-
     return None
 
-
-# ------------------ Manifold ------------------ #
+# ------------------ MANIFOLD ------------------ #
 
 async def fetch_manifold_markets(session):
     try:
@@ -53,37 +58,87 @@ async def fetch_manifold_markets(session):
             resp.raise_for_status()
             return await resp.json()
     except Exception as e:
-        print(f"[Manifold] Fetch error: {e}")
+        print(f"[Manifold] Error: {e}")
         return []
 
 
 def build_manifold_lookup(markets):
     lookup = {}
-
     for m in markets:
         if m.get("outcomeType") != "BINARY":
             continue
 
-        question = m.get("question", "").lower()
-        prob = m.get("probability")
+        q = m.get("question", "").lower()
+        p = m.get("probability")
 
-        if question and prob is not None:
-            lookup[question] = prob
-
+        if q and p is not None:
+            lookup[q] = p
     return lookup
 
 
-# ------------------ Matching ------------------ #
-
-def find_manifold_prob(poly_question, manifold_lookup):
-    pq = poly_question.lower()
-    for mq, prob in manifold_lookup.items():
-        if pq in mq or mq in pq:
+def find_manifold_prob(question, lookup):
+    q = question.lower()
+    for mq, prob in lookup.items():
+        if q in mq or mq in q:
             return prob
     return None
 
+# ------------------ KALSHI ------------------ #
 
-# ------------------ Main Loop ------------------ #
+def kalshi_headers(method, path):
+    ts = str(int(time.time() * 1000))
+    msg = ts + method + path
+
+    sig = hmac.new(
+        KALSHI_API_SECRET.encode(),
+        msg.encode(),
+        hashlib.sha256
+    ).digest()
+
+    return {
+        "KALSHI-ACCESS-KEY": KALSHI_API_KEY,
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+        "KALSHI-ACCESS-TIMESTAMP": ts,
+        "Content-Type": "application/json"
+    }
+
+
+async def fetch_kalshi_markets(session, limit=40):
+    path = f"/trade-api/v2/markets?limit={limit}"
+    url = KALSHI_BASE_URL + path
+
+    try:
+        async with session.get(url, headers=kalshi_headers("GET", path), timeout=10) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return data.get("markets", [])
+    except Exception as e:
+        print(f"[Kalshi] Market fetch error: {e}")
+        return []
+
+
+async def fetch_kalshi_yes_prob(session, ticker):
+    path = f"/trade-api/v2/markets/{ticker}/orderbook"
+    url = KALSHI_BASE_URL + path
+
+    try:
+        async with session.get(url, headers=kalshi_headers("GET", path), timeout=10) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+            yes = data.get("orderbook", {}).get("YES", {})
+            bids = yes.get("bids", [])
+            asks = yes.get("asks", [])
+
+            if not bids or not asks:
+                return None
+
+            return (bids[0]["price"] + asks[0]["price"]) / 200
+    except Exception as e:
+        print(f"[Kalshi] Orderbook error ({ticker}): {e}")
+        return None
+
+# ------------------ MAIN LOOP ------------------ #
 
 async def market_loop():
     await client.wait_until_ready()
@@ -91,24 +146,29 @@ async def market_loop():
     async with aiohttp.ClientSession() as session:
         while not client.is_closed():
 
-            poly_markets = await fetch_polymarket_markets(session)
-            manifold_markets = await fetch_manifold_markets(session)
-            manifold_lookup = build_manifold_lookup(manifold_markets)
+            poly = await fetch_polymarket_markets(session)
+            manifold = await fetch_manifold_markets(session)
+            kalshi = await fetch_kalshi_markets(session)
+
+            manifold_lookup = build_manifold_lookup(manifold)
 
             print(
-                f"\n[Markets] Polymarket: {len(poly_markets)} | "
-                f"Manifold: {len(manifold_lookup)}"
+                f"\n[Markets] "
+                f"Polymarket: {len(poly)} | "
+                f"Manifold: {len(manifold_lookup)} | "
+                f"Kalshi: {len(kalshi)}"
             )
 
             discrepancies = []
 
-            for market in poly_markets:
-                poly_prob = extract_polymarket_yes_prob(market)
+            for m in poly:
+                poly_prob = extract_polymarket_yes_prob(m)
                 if poly_prob is None:
                     continue
 
-                question = market.get("question", "")
+                question = m.get("question", "")
                 manifold_prob = find_manifold_prob(question, manifold_lookup)
+
                 if manifold_prob is None:
                     continue
 
@@ -117,28 +177,42 @@ async def market_loop():
                 if abs(spread) >= DISCREPANCY_THRESHOLD:
                     discrepancies.append({
                         "question": question,
-                        "poly": poly_prob,
+                        "polymarket": poly_prob,
                         "manifold": manifold_prob,
                         "spread": spread
                     })
 
-            # Rank by absolute disagreement
             discrepancies.sort(key=lambda x: abs(x["spread"]), reverse=True)
 
-            # Log top discrepancies
             for d in discrepancies[:5]:
                 print(
                     f"\n[DISCREPANCY]\n"
                     f"{d['question']}\n"
-                    f"  Polymarket YES ≈ {d['poly']:.2%}\n"
-                    f"  Manifold   YES ≈ {d['manifold']:.2%}\n"
+                    f"  Polymarket ≈ {d['polymarket']:.2%}\n"
+                    f"  Manifold   ≈ {d['manifold']:.2%}\n"
                     f"  Spread     ≈ {d['spread']:+.2%}"
                 )
 
+            # Kalshi sample output (separate for now)
+            shown = 0
+            for km in kalshi:
+                ticker = km.get("ticker")
+                title = km.get("title")
+                if not ticker:
+                    continue
+
+                prob = await fetch_kalshi_yes_prob(session, ticker)
+                if prob is None:
+                    continue
+
+                print(f"[Kalshi] {title} | YES ≈ {prob:.2%}")
+                shown += 1
+                if shown >= 3:
+                    break
+
             await asyncio.sleep(FETCH_INTERVAL)
 
-
-# ------------------ Discord ------------------ #
+# ------------------ DISCORD ------------------ #
 
 @client.event
 async def on_ready():
