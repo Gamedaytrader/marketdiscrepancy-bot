@@ -211,14 +211,6 @@ async def market_loop():
 async def on_ready():
     print(f"Logged in as {client.user}")
 
-    # Test alert — remove after you see it once
-    await send_discord(
-        title="🧪 TEST ALERT",
-        market="System Check",
-        lines=["Webhook is working"],
-        color=0x3498db
-    )
-
     client.loop.create_task(market_loop())
 
 client.run(DISCORD_TOKEN)
