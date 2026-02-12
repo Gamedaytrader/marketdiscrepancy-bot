@@ -54,10 +54,17 @@ async def send_discord(title, market, lines, color):
 # ================== KALSHI AUTH ================== #
 
 def kalshi_headers(method: str, path: str):
+    if not KALSHI_PRIVATE_KEY:
+        raise RuntimeError("KALSHI_PRIVATE_KEY not set")
+
     timestamp = str(int(time.time() * 1000))
     message = f"{timestamp}{method.upper()}{path}"
 
-    secret = base64.b64decode(KALSHI_PRIVATE_KEY)
+    # IMPORTANT: strip whitespace + encode
+    private_key_clean = KALSHI_PRIVATE_KEY.strip()
+
+    secret = base64.b64decode(private_key_clean.encode("ascii"))
+
     signature = hmac.new(
         secret,
         message.encode("utf-8"),
@@ -66,9 +73,10 @@ def kalshi_headers(method: str, path: str):
 
     return {
         "KALSHI-ACCESS-KEY": KALSHI_API_KEY_ID,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
         "KALSHI-ACCESS-TIMESTAMP": timestamp
     }
+
 
 # ================== POLYMARKET ================== #
 
