@@ -54,14 +54,14 @@ async def send_discord(title, market, lines, color):
 # ================== KALSHI AUTH ================== #
 
 def kalshi_headers(method: str, path: str):
-    if not KALSHI_PRIVATE_KEY:
-        raise RuntimeError("KALSHI_PRIVATE_KEY not set")
+    if not KALSHI_API_SECRET:
+        raise RuntimeError("KALSHI_API_SECRET" not set")
 
     timestamp = str(int(time.time() * 1000))
     message = f"{timestamp}{method.upper()}{path}"
 
     # IMPORTANT: strip whitespace + encode
-    private_key_clean = KALSHI_PRIVATE_KEY.strip()
+    private_key_clean = KALSHI_API_SECRET.strip()
 
     secret = base64.b64decode(private_key_clean.encode("ascii"))
 
@@ -72,7 +72,7 @@ def kalshi_headers(method: str, path: str):
     ).digest()
 
     return {
-        "KALSHI-ACCESS-KEY": KALSHI_API_KEY_ID,
+        "KALSHI-ACCESS-KEY": KALSHI_API_KEY,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
         "KALSHI-ACCESS-TIMESTAMP": timestamp
     }
