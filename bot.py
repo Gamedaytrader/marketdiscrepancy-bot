@@ -3,6 +3,9 @@ import asyncio
 import aiohttp
 import os
 import time
+import hmac
+import hashlib
+import base64
 
 # ================== CONFIG ================== #
 
@@ -10,90 +13,150 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
+KALSHI_BASE_URL = "https://api.kalshi.com"
 
 FETCH_INTERVAL = 120  # 2 minutes
 
 ALERT_THRESHOLD = 3_000
 WHALE_THRESHOLD = 20_000
-CONFIRM_PCT = 0.05           # 5% price move
-SETUP_EXPIRY = 60 * 60       # 1 hour
-WINDOW_SIZE = 5              # rolling liquidity window
+CONFIRM_PCT = 0.05
+SETUP_EXPIRY = 60 * 60
+WINDOW_SIZE = 5
+
+KALSHI_API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID")
+KALSHI_PRIVATE_KEY = os.environ.get("KALSHI_PRIVATE_KEY")  # base64
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 # ================== STATE ================== #
 
-polymarket_cache = {}        # market_id -> {liquidity, prob}
-liquidity_windows = {}       # market_id -> [deltas]
-open_setups = {}             # market_id -> setup object
+market_cache = {}            # key -> {liquidity, prob}
+liquidity_windows = {}       # key -> [deltas]
+open_setups = {}             # key -> setup object
 
 # ================== DISCORD WEBHOOK ================== #
 
 async def send_discord(title, market, lines, color):
-    print("[DEBUG] Attempting webhook send...")
-    print("[DEBUG] Webhook URL:", DISCORD_WEBHOOK_URL)
-
     payload = {
-        "content": "TEST MESSAGE — if you see this, the webhook works."
+        "embeds": [{
+            "title": title,
+            "description": f"**Market:** {market}\n\n" + "\n".join(lines),
+            "color": color,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        }]
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(DISCORD_WEBHOOK_URL, json=payload) as resp:
-            print("[DEBUG] Webhook response status:", resp.status)
-            text = await resp.text()
-            print("[DEBUG] Webhook response body:", text)
+        async with session.post(DISCORD_WEBHOOK_URL, json=payload):
+            pass
 
+# ================== KALSHI AUTH ================== #
+
+def kalshi_headers(method: str, path: str):
+    timestamp = str(int(time.time() * 1000))
+    message = f"{timestamp}{method.upper()}{path}"
+
+    secret = base64.b64decode(KALSHI_PRIVATE_KEY)
+    signature = hmac.new(
+        secret,
+        message.encode("utf-8"),
+        hashlib.sha256
+    ).digest()
+
+    return {
+        "KALSHI-ACCESS-KEY": KALSHI_API_KEY_ID,
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+        "KALSHI-ACCESS-TIMESTAMP": timestamp
+    }
 
 # ================== POLYMARKET ================== #
 
-async def fetch_polymarket_markets(session):
-    try:
-        async with session.get(POLYMARKET_URL, timeout=15) as resp:
-            resp.raise_for_status()
-            payload = await resp.json()
-            return payload.get("data", [])
-    except Exception as e:
-        print(f"[Polymarket] Fetch error: {e}")
-        return []
+async def fetch_polymarket(session):
+    markets = []
+    async with session.get(POLYMARKET_URL, timeout=15) as resp:
+        payload = await resp.json()
+        for m in payload.get("data", []):
+            market_id = f"poly|{m.get('id')}"
+            question = m.get("question")
+            liquidity = m.get("liquidity")
 
-def extract_yes_prob(market):
-    for o in market.get("outcomes", []):
-        if o.get("name", "").upper() == "YES":
-            bid = o.get("bestBid")
-            ask = o.get("bestAsk")
-            if bid is not None and ask is not None:
-                return (bid + ask) / 2
-    return None
+            yes_prob = None
+            for o in m.get("outcomes", []):
+                if o.get("name", "").upper() == "YES":
+                    bid, ask = o.get("bestBid"), o.get("bestAsk")
+                    if bid and ask:
+                        yes_prob = (bid + ask) / 2
+
+            if yes_prob is not None and liquidity is not None:
+                markets.append({
+                    "key": market_id,
+                    "question": question,
+                    "liquidity": float(liquidity),
+                    "prob": float(yes_prob)
+                })
+    return markets
+
+# ================== KALSHI ================== #
+
+async def fetch_kalshi(session):
+    markets = []
+    path = "/trade-api/v2/markets"
+    url = f"{KALSHI_BASE_URL}{path}"
+
+    headers = kalshi_headers("GET", path)
+    params = {"limit": 200}
+
+    async with session.get(url, headers=headers, params=params) as resp:
+        payload = await resp.json()
+
+        for m in payload.get("markets", []):
+            market_id = f"kalshi|{m.get('id')}"
+            question = m.get("title")
+
+            yes_price = m.get("yes_price")
+            volume = m.get("volume")
+
+            if yes_price is None or volume is None:
+                continue
+
+            markets.append({
+                "key": market_id,
+                "question": question,
+                "liquidity": float(volume),  # proxy
+                "prob": float(yes_price)
+            })
+
+    return markets
 
 # ================== LIQUIDITY ================== #
 
-def track_liquidity(market_id, delta):
-    window = liquidity_windows.setdefault(market_id, [])
+def track_liquidity(key, delta):
+    window = liquidity_windows.setdefault(key, [])
     window.append(delta)
     if len(window) > WINDOW_SIZE:
         window.pop(0)
 
-def net_liquidity(market_id):
-    return sum(liquidity_windows.get(market_id, []))
+def net_liquidity(key):
+    return sum(liquidity_windows.get(key, []))
 
 # ================== SETUP ================== #
 
-async def maybe_trigger_setup(market_id, question, net_delta, yes_price):
+async def maybe_trigger_setup(key, question, net_delta, yes_price):
     if abs(net_delta) < ALERT_THRESHOLD:
         return
-    if market_id in open_setups:
+    if key in open_setups:
         return
 
     whale = abs(net_delta) >= WHALE_THRESHOLD
     pulled = net_delta < 0
 
-    action_side = "NO" if pulled else "YES"
-    action_price = (1 - yes_price) if pulled else yes_price
+    side = "NO" if pulled else "YES"
+    entry = (1 - yes_price) if pulled else yes_price
 
-    open_setups[market_id] = {
-        "side": action_side,
-        "entry": action_price,
+    open_setups[key] = {
+        "side": side,
+        "entry": entry,
         "timestamp": time.time(),
         "confirmed": False
     }
@@ -105,42 +168,34 @@ async def maybe_trigger_setup(market_id, question, net_delta, yes_price):
             f"{'🔴' if pulled else '🟢'} ${abs(net_delta):,.0f} {'pulled' if pulled else 'added'}",
             "📌 Liquidity moved first",
             "",
-            f"🎯 Action: Buy {action_side} @ {action_price:.2f}"
+            f"🎯 Action: Buy {side} @ {entry:.2f}"
         ],
         color=0xe74c3c if pulled else 0x2ecc71
     )
 
 # ================== FOLLOW UPS ================== #
 
-async def check_followups(market_id, question, yes_price):
-    setup = open_setups.get(market_id)
+async def check_followups(key, question, yes_price):
+    setup = open_setups.get(key)
     if not setup:
         return
 
     now = time.time()
 
-    # TIMEOUT → INVALIDATED
     if now - setup["timestamp"] > SETUP_EXPIRY:
-        await send_discord(
-            title="❌ INVALIDATED",
-            market=question,
-            lines=["Timed out with no price reaction"],
-            color=0x95a5a6
-        )
-        del open_setups[market_id]
+        del open_setups[key]
         return
 
-    current_price = yes_price if setup["side"] == "YES" else (1 - yes_price)
-    move_pct = (current_price - setup["entry"]) / setup["entry"]
+    current = yes_price if setup["side"] == "YES" else (1 - yes_price)
+    move_pct = (current - setup["entry"]) / setup["entry"]
 
-    # CONFIRMED
     if not setup["confirmed"] and move_pct >= CONFIRM_PCT:
         setup["confirmed"] = True
         await send_discord(
             title="✅ CONFIRMED: Price Reacting",
             market=question,
             lines=[
-                f"{setup['side']}: {setup['entry']:.2f} → {current_price:.2f}",
+                f"{setup['side']}: {setup['entry']:.2f} → {current:.2f}",
                 f"📈 {move_pct*100:.1f}%",
                 "",
                 "🧠 Liquidity led. Market followed."
@@ -148,59 +203,39 @@ async def check_followups(market_id, question, yes_price):
             color=0xf1c40f
         )
 
-    # LIQUIDITY REVERSAL → INVALIDATED
-    if abs(net_liquidity(market_id)) < ALERT_THRESHOLD:
-        await send_discord(
-            title="❌ INVALIDATED",
-            market=question,
-            lines=["Liquidity reversed before confirmation"],
-            color=0x95a5a6
-        )
-        del open_setups[market_id]
-
 # ================== MAIN LOOP ================== #
 
 async def market_loop():
     await client.wait_until_ready()
 
     async with aiohttp.ClientSession() as session:
-        while not client.is_closed():
-            markets = await fetch_polymarket_markets(session)
-            print(f"[Poll] {len(markets)} markets fetched")
+        while True:
+            poly = await fetch_polymarket(session)
+            kalshi = await fetch_kalshi(session)
 
-            for m in markets:
-                market_id = m.get("id")
-                question = m.get("question", "")
-                liquidity = m.get("liquidity")
+            for m in poly + kalshi:
+                key = m["key"]
+                question = m["question"]
+                liquidity = m["liquidity"]
+                prob = m["prob"]
 
-                yes_prob = extract_yes_prob(m)
-                if market_id is None or liquidity is None or yes_prob is None:
-                    continue
-
-                prev = polymarket_cache.get(market_id)
-
+                prev = market_cache.get(key)
                 if prev:
                     delta = liquidity - prev["liquidity"]
-                    track_liquidity(market_id, delta)
-
-                    net_delta = net_liquidity(market_id)
+                    track_liquidity(key, delta)
 
                     await maybe_trigger_setup(
-                        market_id,
+                        key,
                         question,
-                        net_delta,
-                        yes_prob
+                        net_liquidity(key),
+                        prob
                     )
 
-                    await check_followups(
-                        market_id,
-                        question,
-                        yes_prob
-                    )
+                    await check_followups(key, question, prob)
 
-                polymarket_cache[market_id] = {
+                market_cache[key] = {
                     "liquidity": liquidity,
-                    "prob": yes_prob
+                    "prob": prob
                 }
 
             await asyncio.sleep(FETCH_INTERVAL)
@@ -210,7 +245,7 @@ async def market_loop():
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
-
     client.loop.create_task(market_loop())
 
 client.run(DISCORD_TOKEN)
+
