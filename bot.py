@@ -14,8 +14,9 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
 KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
-FETCH_INTERVAL = 120  # seconds
+FETCH_INTERVAL = 120
 
 ALERT_THRESHOLD = 500
 WHALE_THRESHOLD = 20_000
@@ -24,9 +25,7 @@ SETUP_EXPIRY = 60 * 60
 WINDOW_SIZE = 5
 
 KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY")
-KALSHI_API_SECRET = os.environ.get("KALSHI_API_SECRET")  # base64 encoded
-
-# ================== DISCORD ================== #
+KALSHI_API_SECRET = os.environ.get("KALSHI_API_SECRET")
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
@@ -37,13 +36,9 @@ market_cache = {}
 liquidity_windows = {}
 open_setups = {}
 
-# ================== DISCORD WEBHOOK ================== #
+# ================== DISCORD ================== #
 
 async def send_discord(title, market, lines, color):
-    if not DISCORD_WEBHOOK_URL:
-        print("Webhook URL not set.")
-        return
-
     payload = {
         "embeds": [{
             "title": title,
@@ -54,20 +49,17 @@ async def send_discord(title, market, lines, color):
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(DISCORD_WEBHOOK_URL, json=payload) as resp:
-            if resp.status != 204:
-                print("Webhook error:", resp.status, await resp.text())
+        async with session.post(DISCORD_WEBHOOK_URL, json=payload):
+            pass
 
 # ================== KALSHI AUTH ================== #
 
 def kalshi_headers(method: str, path: str):
-    if not KALSHI_API_KEY or not KALSHI_API_SECRET:
-        raise RuntimeError("Kalshi credentials not set")
-
     timestamp = str(int(time.time() * 1000))
     message = f"{timestamp}{method.upper()}{path}"
 
-    secret = base64.b64decode(KALSHI_API_SECRET.strip())
+    secret = base64.b64decode(KALSHI_API_SECRET.strip().encode("ascii"))
+
     signature = hmac.new(
         secret,
         message.encode("utf-8"),
@@ -76,7 +68,7 @@ def kalshi_headers(method: str, path: str):
 
     return {
         "KALSHI-ACCESS-KEY": KALSHI_API_KEY,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
         "KALSHI-ACCESS-TIMESTAMP": timestamp
     }
 
@@ -84,36 +76,31 @@ def kalshi_headers(method: str, path: str):
 
 async def fetch_polymarket(session):
     markets = []
-
     try:
         async with session.get(POLYMARKET_URL, timeout=15) as resp:
-            if resp.status != 200:
-                print("Polymarket error:", resp.status)
-                return []
-
             payload = await resp.json()
 
-            for m in payload.get("data", []):
-                liquidity = m.get("liquidity")
-                question = m.get("question")
+        for m in payload.get("data", []):
+            liquidity = m.get("liquidity")
+            question = m.get("question")
 
-                yes_prob = None
-                for o in m.get("outcomes", []):
-                    if o.get("name", "").upper() == "YES":
-                        bid, ask = o.get("bestBid"), o.get("bestAsk")
-                        if bid and ask:
-                            yes_prob = (bid + ask) / 2
+            yes_prob = None
+            for o in m.get("outcomes", []):
+                if o.get("name", "").upper() == "YES":
+                    bid, ask = o.get("bestBid"), o.get("bestAsk")
+                    if bid and ask:
+                        yes_prob = (bid + ask) / 2
 
-                if liquidity and yes_prob:
-                    markets.append({
-                        "key": f"poly|{m.get('id')}",
-                        "question": question,
-                        "liquidity": float(liquidity),
-                        "prob": float(yes_prob)
-                    })
-
+            if liquidity and yes_prob:
+                markets.append({
+                    "key": f"poly|{m.get('id')}",
+                    "platform": "Polymarket",
+                    "question": question,
+                    "liquidity": float(liquidity),
+                    "prob": float(yes_prob)
+                })
     except Exception as e:
-        print("Polymarket fetch error:", e)
+        print("Polymarket error:", e)
 
     return markets
 
@@ -121,40 +108,67 @@ async def fetch_polymarket(session):
 
 async def fetch_kalshi(session):
     markets = []
-
     path = "/markets"
     url = f"{KALSHI_BASE_URL}{path}"
-    headers = kalshi_headers("GET", path)
-    params = {"limit": 200}
 
     try:
-        async with session.get(url, headers=headers, params=params) as resp:
+        headers = kalshi_headers("GET", path)
+
+        async with session.get(url, headers=headers, params={"limit": 200}) as resp:
             if resp.status != 200:
                 print("Kalshi error:", resp.status, await resp.text())
                 return []
-
             payload = await resp.json()
 
-            for m in payload.get("markets", []):
-                yes_price = m.get("yes_price")
-                volume = m.get("volume")
+        for m in payload.get("markets", []):
+            yes_price = m.get("yes_price")
+            volume = m.get("volume")
 
-                if yes_price is None or volume is None:
-                    continue
-
+            if yes_price and volume:
                 markets.append({
                     "key": f"kalshi|{m.get('id')}",
+                    "platform": "Kalshi",
                     "question": m.get("title"),
                     "liquidity": float(volume),
                     "prob": float(yes_price)
                 })
-
     except Exception as e:
-        print("Kalshi fetch error:", e)
+        print("Kalshi exception:", e)
 
     return markets
 
-# ================== LIQUIDITY TRACKING ================== #
+# ================== MANIFOLD ================== #
+
+async def fetch_manifold(session):
+    markets = []
+    try:
+        async with session.get(f"{MANIFOLD_URL}?limit=200", timeout=15) as resp:
+            if resp.status != 200:
+                print("Manifold error:", resp.status, await resp.text())
+                return []
+            payload = await resp.json()
+
+        for m in payload:
+            if m.get("isResolved"):
+                continue
+
+            volume_24h = m.get("volume24Hours")
+            prob = m.get("probability")
+
+            if volume_24h and prob:
+                markets.append({
+                    "key": f"manifold|{m.get('id')}",
+                    "platform": "Manifold",
+                    "question": m.get("question"),
+                    "liquidity": float(volume_24h),
+                    "prob": float(prob)
+                })
+    except Exception as e:
+        print("Manifold exception:", e)
+
+    return markets
+
+# ================== LIQUIDITY ================== #
 
 def track_liquidity(key, delta):
     window = liquidity_windows.setdefault(key, [])
@@ -165,21 +179,21 @@ def track_liquidity(key, delta):
 def net_liquidity(key):
     return sum(liquidity_windows.get(key, []))
 
-# ================== SETUP LOGIC ================== #
+# ================== SETUP ================== #
 
-async def maybe_trigger_setup(key, question, net_delta, yes_price):
+async def maybe_trigger_setup(market, net_delta):
     if abs(net_delta) < ALERT_THRESHOLD:
         return
-    if key in open_setups:
+    if market["key"] in open_setups:
         return
 
     whale = abs(net_delta) >= WHALE_THRESHOLD
     pulled = net_delta < 0
 
     side = "NO" if pulled else "YES"
-    entry = (1 - yes_price) if pulled else yes_price
+    entry = (1 - market["prob"]) if pulled else market["prob"]
 
-    open_setups[key] = {
+    open_setups[market["key"]] = {
         "side": side,
         "entry": entry,
         "timestamp": time.time(),
@@ -187,36 +201,41 @@ async def maybe_trigger_setup(key, question, net_delta, yes_price):
     }
 
     await send_discord(
-        title=f"💧 Sharp Liquidity Move{' 🐋' if whale else ''}",
-        market=question,
+        title=f"💧 {market['platform']} Sharp Liquidity{' 🐋' if whale else ''}",
+        market=market["question"],
         lines=[
-            f"{'🔴' if pulled else '🟢'} ${abs(net_delta):,.0f}",
-            f"🎯 Buy {side} @ {entry:.2f}"
+            f"{'🔴' if pulled else '🟢'} ${abs(net_delta):,.0f} {'pulled' if pulled else 'added'}",
+            "",
+            f"🎯 Action: Buy {side} @ {entry:.2f}"
         ],
         color=0xe74c3c if pulled else 0x2ecc71
     )
 
-async def check_followups(key, question, yes_price):
-    setup = open_setups.get(key)
+# ================== FOLLOW UPS ================== #
+
+async def check_followups(market):
+    setup = open_setups.get(market["key"])
     if not setup:
         return
 
     if time.time() - setup["timestamp"] > SETUP_EXPIRY:
-        del open_setups[key]
+        del open_setups[market["key"]]
         return
 
-    current = yes_price if setup["side"] == "YES" else (1 - yes_price)
+    current = market["prob"] if setup["side"] == "YES" else (1 - market["prob"])
     move_pct = (current - setup["entry"]) / setup["entry"]
 
     if not setup["confirmed"] and move_pct >= CONFIRM_PCT:
         setup["confirmed"] = True
 
         await send_discord(
-            title="✅ CONFIRMED: Price Reacting",
-            market=question,
+            title=f"✅ {market['platform']} Confirmation",
+            market=market["question"],
             lines=[
                 f"{setup['side']}: {setup['entry']:.2f} → {current:.2f}",
-                f"📈 {move_pct*100:.1f}%"
+                f"📈 {move_pct*100:.1f}%",
+                "",
+                "Liquidity led. Price followed."
             ],
             color=0xf1c40f
         )
@@ -228,60 +247,37 @@ async def market_loop():
 
     async with aiohttp.ClientSession() as session:
         while True:
-            try:
-                print("Polling markets...")
+            poly = await fetch_polymarket(session)
+            kalshi = await fetch_kalshi(session)
+            manifold = await fetch_manifold(session)
 
-                poly = await fetch_polymarket(session)
-                kalshi = await fetch_kalshi(session)
+            for m in poly + kalshi + manifold:
+                key = m["key"]
+                prev = market_cache.get(key)
 
-                print(f"Polymarket: {len(poly)} | Kalshi: {len(kalshi)}")
+                if prev:
+                    delta = m["liquidity"] - prev["liquidity"]
+                    track_liquidity(key, delta)
 
-                for m in poly + kalshi:
-                    key = m["key"]
-                    liquidity = m["liquidity"]
-                    prob = m["prob"]
-                    question = m["question"]
+                    await maybe_trigger_setup(m, net_liquidity(key))
+                    await check_followups(m)
 
-                    prev = market_cache.get(key)
+                market_cache[key] = {
+                    "liquidity": m["liquidity"],
+                    "prob": m["prob"]
+                }
 
-                    if prev:
-                        delta = liquidity - prev["liquidity"]
-                        track_liquidity(key, delta)
+            print(f"[Markets] Poly: {len(poly)} | Kalshi: {len(kalshi)} | Manifold: {len(manifold)}")
 
-                        await maybe_trigger_setup(
-                            key,
-                            question,
-                            net_liquidity(key),
-                            prob
-                        )
+            await asyncio.sleep(FETCH_INTERVAL)
 
-                        await check_followups(key, question, prob)
-
-                    market_cache[key] = {
-                        "liquidity": liquidity,
-                        "prob": prob
-                    }
-
-                await asyncio.sleep(FETCH_INTERVAL)
-
-            except Exception as e:
-                print("Market loop crash:", e)
-                await asyncio.sleep(10)
-
-# ================== DISCORD EVENTS ================== #
+# ================== DISCORD ================== #
 
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
-
-    await send_discord(
-        title="Bot Online",
-        market="System",
-        lines=["Liquidity engine running"],
-        color=0x3498db
-    )
-
     client.loop.create_task(market_loop())
 
 client.run(DISCORD_TOKEN)
+
 
