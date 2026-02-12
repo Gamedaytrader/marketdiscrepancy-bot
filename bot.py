@@ -15,7 +15,7 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
 KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
-url = f"{BASE_URL}/markets?limit=200"
+url = f"{KALSHI_BASE_URL}/markets?limit=200"
 
 
 FETCH_INTERVAL = 120  # 2 minutes
