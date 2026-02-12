@@ -12,7 +12,7 @@ POLYMARKET_URL = "https://clob.polymarket.com/markets"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
 FETCH_INTERVAL = 600          # seconds (10 minutes)
-DISCREPANCY_THRESHOLD = 0.10  # 10%
+DISCREPANCY_THRESHOLD = 0.03  # 3%
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
