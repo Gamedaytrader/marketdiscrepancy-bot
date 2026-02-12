@@ -55,7 +55,7 @@ async def send_discord(title, market, lines, color):
 
 def kalshi_headers(method: str, path: str):
     if not KALSHI_API_SECRET:
-        raise RuntimeError("KALSHI_API_SECRET" not set")
+        raise RuntimeError("KALSHI_API_SECRET not set")
 
     timestamp = str(int(time.time() * 1000))
     message = f"{timestamp}{method.upper()}{path}"
