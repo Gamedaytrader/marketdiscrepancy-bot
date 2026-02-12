@@ -10,10 +10,10 @@
 \outl0\strokewidth0 \strokec2 import discord\
 import asyncio\
 \
-DISCORD_TOKEN = 
-\f1\fs26 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 MTQ3MTUyMzE0MzQ5ODU5NjM4Mg.G8Zzgg.qQiykNl2a5nkgMAp6V2MQlVIA-YlFHvNeOJCvo
-\f0\fs24 \expnd0\expndtw0\kerning0
-\outl0\strokewidth0 \strokec2 \
+import os
+
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+
 CHANNEL_ID = 1129181425271328788\
 \
 intents = discord.Intents.default()\
