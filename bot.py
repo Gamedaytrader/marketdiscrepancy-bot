@@ -31,18 +31,19 @@ open_setups = {}             # market_id -> setup object
 # ================== DISCORD WEBHOOK ================== #
 
 async def send_discord(title, market, lines, color):
+    print("[DEBUG] Attempting webhook send...")
+    print("[DEBUG] Webhook URL:", DISCORD_WEBHOOK_URL)
+
     payload = {
-        "embeds": [{
-            "title": title,
-            "description": f"**Market:** {market}\n\n" + "\n".join(lines),
-            "color": color,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        }]
+        "content": "TEST MESSAGE — if you see this, the webhook works."
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(DISCORD_WEBHOOK_URL, json=payload):
-            pass
+        async with session.post(DISCORD_WEBHOOK_URL, json=payload) as resp:
+            print("[DEBUG] Webhook response status:", resp.status)
+            text = await resp.text()
+            print("[DEBUG] Webhook response body:", text)
+
 
 # ================== POLYMARKET ================== #
 
