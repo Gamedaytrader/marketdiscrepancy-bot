@@ -13,7 +13,7 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
-KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+KALSHI_BASE_URL = "https://api.kalshi.com/trade-api/v2"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
 FETCH_INTERVAL = 120
@@ -89,7 +89,13 @@ async def fetch_polymarket(session):
         async with session.get(POLYMARKET_URL, timeout=15) as resp:
             payload = await resp.json()
 
-        for m in payload.get("data", []):
+        # Handle both list and dict structures
+        if isinstance(payload, dict):
+            data = payload.get("data", [])
+        else:
+            data = payload
+
+        for m in data:
             liquidity = safe_float(m.get("liquidity"))
             question = m.get("question")
 
@@ -114,6 +120,7 @@ async def fetch_polymarket(session):
         print("Polymarket error:", e)
 
     return markets
+
 
 # ================== KALSHI ================== #
 
