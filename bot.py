@@ -13,16 +13,18 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 
 POLYMARKET_URL = "https://clob.polymarket.com/markets"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
-KALSHI_BASE_URL = "https://trading-api.kalshi.com"
-
-KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY")
-KALSHI_API_SECRET = os.environ.get("KALSHI_API_SECRET")
 
 FETCH_INTERVAL = 600          # 10 minutes
 DISCREPANCY_THRESHOLD = 0.05  # 5%
+LIQUIDITY_DELTA_THRESHOLD = 50_000  # $50k
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
+
+# ================== STATE ================== #
+
+# market_id -> {"liquidity": float, "prob": float}
+polymarket_liquidity_cache = {}
 
 # ================== POLYMARKET ================== #
 
@@ -85,69 +87,19 @@ def find_manifold_prob(question, lookup):
             return prob
     return None
 
-# ================== KALSHI ================== #
+# ================== LIQUIDITY LOGGING ================== #
 
-def kalshi_headers(method, path):
-    timestamp = str(int(time.time() * 1000))
-    message = f"{timestamp}{method.upper()}{path}"
+def log_liquidity_delta(question, delta_liq, old_prob, new_prob):
+    price_delta = None
+    if old_prob is not None and new_prob is not None:
+        price_delta = new_prob - old_prob
 
-    signature = hmac.new(
-        KALSHI_API_SECRET.encode(),
-        message.encode(),
-        hashlib.sha256
-    ).digest()
-
-    return {
-        "KALSHI-ACCESS-KEY": KALSHI_API_KEY,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "Content-Type": "application/json"
-    }
-
-
-async def fetch_kalshi_markets(session, limit=50):
-    path = f"/trade-api/v2/markets?limit={limit}"
-    url = KALSHI_BASE_URL + path
-
-    try:
-        async with session.get(
-            url,
-            headers=kalshi_headers("GET", path),
-            timeout=10
-        ) as resp:
-            resp.raise_for_status()
-            payload = await resp.json()
-            return payload.get("markets", [])
-    except Exception as e:
-        print(f"[Kalshi] Market fetch error: {e}")
-        return []
-
-
-async def fetch_kalshi_yes_prob(session, ticker):
-    path = f"/trade-api/v2/markets/{ticker}/orderbook"
-    url = KALSHI_BASE_URL + path
-
-    try:
-        async with session.get(
-            url,
-            headers=kalshi_headers("GET", path),
-            timeout=10
-        ) as resp:
-            resp.raise_for_status()
-            payload = await resp.json()
-
-            yes = payload.get("orderbook", {}).get("YES", {})
-            bids = yes.get("bids", [])
-            asks = yes.get("asks", [])
-
-            if not bids or not asks:
-                return None
-
-            return (bids[0]["price"] + asks[0]["price"]) / 200
-
-    except Exception as e:
-        print(f"[Kalshi] Orderbook error ({ticker}): {e}")
-        return None
+    print(
+        f"\n[LIQUIDITY]\n"
+        f"{question}\n"
+        f"  Liquidity Δ ≈ ${delta_liq:,.0f}\n"
+        f"  Price Δ     ≈ {price_delta:+.2%}" if price_delta is not None else ""
+    )
 
 # ================== MAIN LOOP ================== #
 
@@ -159,27 +111,52 @@ async def market_loop():
 
             poly_markets = await fetch_polymarket_markets(session)
             manifold_markets = await fetch_manifold_markets(session)
-            kalshi_markets = await fetch_kalshi_markets(session)
 
             manifold_lookup = build_manifold_lookup(manifold_markets)
 
             print(
                 f"\n[Markets] "
                 f"Polymarket: {len(poly_markets)} | "
-                f"Manifold: {len(manifold_lookup)} | "
-                f"Kalshi: {len(kalshi_markets)}"
+                f"Manifold: {len(manifold_lookup)}"
             )
-
-            # ---- Polymarket vs Manifold Discrepancies ---- #
 
             discrepancies = []
 
             for m in poly_markets:
+                market_id = m.get("id")
+                question = m.get("question", "")
+                liquidity = m.get("liquidity")
+
                 poly_prob = extract_polymarket_yes_prob(m)
                 if poly_prob is None:
                     continue
 
-                question = m.get("question", "")
+                # -------- Liquidity delta tracking -------- #
+
+                if market_id and liquidity is not None:
+                    prev = polymarket_liquidity_cache.get(market_id)
+
+                    if prev:
+                        old_liq = prev["liquidity"]
+                        old_prob = prev["prob"]
+
+                        delta = liquidity - old_liq
+
+                        if delta >= LIQUIDITY_DELTA_THRESHOLD:
+                            log_liquidity_delta(
+                                question=question,
+                                delta_liq=delta,
+                                old_prob=old_prob,
+                                new_prob=poly_prob
+                            )
+
+                    polymarket_liquidity_cache[market_id] = {
+                        "liquidity": liquidity,
+                        "prob": poly_prob
+                    }
+
+                # -------- Consensus deviation (Poly vs Manifold) -------- #
+
                 manifold_prob = find_manifold_prob(question, manifold_lookup)
                 if manifold_prob is None:
                     continue
@@ -205,26 +182,6 @@ async def market_loop():
                     f"  Spread     ≈ {d['spread']:+.2%}"
                 )
 
-            # ---- Kalshi Sample Prices ---- #
-
-            shown = 0
-            for km in kalshi_markets:
-                ticker = km.get("ticker")
-                title = km.get("title")
-
-                if not ticker:
-                    continue
-
-                prob = await fetch_kalshi_yes_prob(session, ticker)
-                if prob is None:
-                    continue
-
-                print(f"[Kalshi] {title} | YES ≈ {prob:.2%}")
-
-                shown += 1
-                if shown >= 3:
-                    break
-
             await asyncio.sleep(FETCH_INTERVAL)
 
 # ================== DISCORD ================== #
@@ -236,4 +193,3 @@ async def on_ready():
 
 
 client.run(DISCORD_TOKEN)
-
