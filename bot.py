@@ -112,13 +112,19 @@ async def fetch_polymarket(session):
 
 async def fetch_kalshi(session):
     markets = []
-    path = "/trade-api/v2/markets"
+
+    path = "/markets"  # ✅ FIXED
     url = f"{KALSHI_BASE_URL}{path}"
 
     headers = kalshi_headers("GET", path)
     params = {"limit": 200}
 
     async with session.get(url, headers=headers, params=params) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            print(f"Kalshi error {resp.status}: {text}")
+            return []
+
         payload = await resp.json()
 
         for m in payload.get("markets", []):
@@ -134,11 +140,12 @@ async def fetch_kalshi(session):
             markets.append({
                 "key": market_id,
                 "question": question,
-                "liquidity": float(volume),  # proxy
+                "liquidity": float(volume),
                 "prob": float(yes_price)
             })
 
     return markets
+
 
 # ================== LIQUIDITY ================== #
 
