@@ -65,7 +65,7 @@ def extract_yes_prob(market):
                 return (bid + ask) / 2
     return None
 
-# ================== LIQUIDITY UTILS ================== #
+# ================== LIQUIDITY ================== #
 
 def track_liquidity(market_id, delta):
     window = liquidity_windows.setdefault(market_id, [])
@@ -118,7 +118,7 @@ async def check_followups(market_id, question, yes_price):
 
     now = time.time()
 
-    # TIMEOUT
+    # TIMEOUT → INVALIDATED
     if now - setup["timestamp"] > SETUP_EXPIRY:
         await send_discord(
             title="❌ INVALIDATED",
@@ -147,7 +147,7 @@ async def check_followups(market_id, question, yes_price):
             color=0xf1c40f
         )
 
-    # LIQUIDITY REVERSAL
+    # LIQUIDITY REVERSAL → INVALIDATED
     if abs(net_liquidity(market_id)) < ALERT_THRESHOLD:
         await send_discord(
             title="❌ INVALIDATED",
@@ -165,6 +165,7 @@ async def market_loop():
     async with aiohttp.ClientSession() as session:
         while not client.is_closed():
             markets = await fetch_polymarket_markets(session)
+            print(f"[Poll] {len(markets)} markets fetched")
 
             for m in markets:
                 market_id = m.get("id")
@@ -202,25 +203,21 @@ async def market_loop():
                 }
 
             await asyncio.sleep(FETCH_INTERVAL)
-        @client.event
-async def on_ready():
-    print(f"Logged in as {client.user}")
-
-    await send_discord(
-        title="🧪 TEST ALERT",
-        market="System Check",
-        lines=["If you see this, webhooks are working"],
-        color=0x3498db
-    )
-
-    client.loop.create_task(market_loop())
-
 
 # ================== DISCORD ================== #
 
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
+
+    # Test alert — remove after you see it once
+    await send_discord(
+        title="🧪 TEST ALERT",
+        market="System Check",
+        lines=["Webhook is working"],
+        color=0x3498db
+    )
+
     client.loop.create_task(market_loop())
 
 client.run(DISCORD_TOKEN)
