@@ -12,7 +12,7 @@ import base64
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-POLYMARKET_URL = "https://clob.polymarket.com/markets?limit=500"
+POLYMARKET_URL = "https://gamma-api.polymarket.com/markets?limit=500&active=true"
 KALSHI_BASE_URL = "https://api.kalshi.com/trade-api/v2"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
