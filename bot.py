@@ -60,48 +60,16 @@ async def send_discord(title, market, lines, color):
 # ================== POLYMARKET ================== #
 
 async def fetch_polymarket(session):
-    markets = []
-
     try:
         async with session.get(POLYMARKET_URL, timeout=15) as resp:
-            payload = await resp.json()
-
-        # Handle both response shapes
-        if isinstance(payload, dict):
-            data = payload.get("data", [])
-        elif isinstance(payload, list):
-            data = payload
-        else:
-            print("Polymarket unknown structure:", type(payload))
+            print("POLY STATUS:", resp.status)
+            text = await resp.text()
+            print("POLY RESPONSE FIRST 500 CHARS:\n", text[:500])
             return []
-
-        for m in data:
-            liquidity = safe_float(m.get("liquidity"))
-            question = m.get("question")
-
-            outcomes = m.get("outcomes", [])
-            yes_prob = None
-
-            for o in outcomes:
-                if o.get("name", "").upper() == "YES":
-                    bid = safe_float(o.get("bestBid"))
-                    ask = safe_float(o.get("bestAsk"))
-                    if bid is not None and ask is not None:
-                        yes_prob = (bid + ask) / 2
-
-            if liquidity is not None and yes_prob is not None:
-                markets.append({
-                    "key": f"poly|{m.get('id')}",
-                    "platform": "Polymarket",
-                    "question": question,
-                    "liquidity": liquidity,
-                    "prob": yes_prob
-                })
-
     except Exception as e:
         print("Polymarket error:", e)
+        return []
 
-    return markets
 
 # ================== KALSHI ================== #
 
