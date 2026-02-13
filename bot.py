@@ -54,94 +54,50 @@ async def fetch_polymarket(session):
 
     try:
         async with session.get(POLYMARKET_URL, timeout=20) as resp:
-            logger.info(f"Polymarket status: {resp.status}")
-
+            print("Polymarket status:", resp.status)
             if resp.status != 200:
-                logger.error(f"Polymarket bad status: {resp.status}")
                 return []
 
-            payload = await resp.json()
-            logger.info(f"Polymarket payload received, type: {type(payload)}")
+            data = await resp.json()
 
-        # Defensive parsing
-        if isinstance(payload, list):
-            data = payload
-            logger.info("Payload is a list")
-        elif isinstance(payload, dict):
-            logger.info(f"Payload is dict with keys: {list(payload.keys())}")
-            if "data" in payload:
-                data = payload["data"]
-                logger.info("Using 'data' key")
-            elif "markets" in payload:
-                data = payload["markets"]
-                logger.info("Using 'markets' key")
-            else:
-                logger.error(f"Unknown dict keys: {list(payload.keys())}")
-                return []
-        else:
-            logger.error(f"Unknown payload type: {type(payload)}")
-            return []
+        print("Polymarket raw count:", len(data))
 
-        logger.info(f"Polymarket raw count: {len(data)}")
+        for m in data:
 
-        for idx, m in enumerate(data):
-            try:
-                # Skip closed/inactive markets
-                if m.get("closed"):
-                    continue
-                
-                if not m.get("active"):
-                    continue
-                
-                # Parse liquidity (can be string or number)
-                liquidity_raw = m.get("liquidity") or m.get("liquidityNum")
-                liquidity = safe_float(liquidity_raw)
-                
-                # Skip markets with no liquidity
-                if liquidity is None or liquidity == 0:
-                    continue
-                
-                question = m.get("question")
-                
-                # Parse outcomePrices - it might be a JSON string or a list
-                prices_raw = m.get("outcomePrices") or m.get("outcome_prices")
-                
-                if isinstance(prices_raw, str):
-                    try:
-                        prices = json.loads(prices_raw)
-                    except Exception as parse_err:
-                        logger.error(f"Failed to parse prices for market {idx}: {parse_err}")
-                        continue
-                else:
-                    prices = prices_raw
-                
-                # Ensure we have exactly 2 outcomes
-                if not prices or len(prices) != 2:
-                    continue
+            question = m.get("question")
 
-                yes_price = safe_float(prices[0])
+            # New liquidity field
+            liquidity = safe_float(
+                m.get("liquidityNum")
+                or m.get("liquidity")
+            )
 
-                if yes_price is None:
-                    continue
+            # New price format
+            outcomes = m.get("outcomes")
 
-                markets.append({
-                    "key": f"poly|{m.get('id')}",
-                    "platform": "Polymarket",
-                    "question": question,
-                    "liquidity": liquidity,
-                    "prob": yes_price
-                })
-                
-            except Exception as market_err:
-                logger.error(f"Error processing market {idx}: {market_err}")
+            if not outcomes or len(outcomes) != 2:
                 continue
 
-        logger.info(f"Polymarket parsed: {len(markets)} markets")
+            yes_price = safe_float(
+                outcomes[0].get("price")
+            )
+
+            if liquidity is None or yes_price is None:
+                continue
+
+            markets.append({
+                "key": f"poly|{m.get('id')}",
+                "platform": "Polymarket",
+                "question": question,
+                "liquidity": liquidity,
+                "prob": yes_price
+            })
 
     except Exception as e:
-        logger.error(f"Polymarket error: {e}", exc_info=True)
+        print("Polymarket error:", e)
 
     return markets
+
 
 # ================== POLYMARKET WEBSOCKET ================== #
 
