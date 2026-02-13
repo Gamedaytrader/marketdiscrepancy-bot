@@ -32,23 +32,8 @@ def safe_float(v):
     except:
         return None
 
-# ================== DISCORD ================== #
-
-async def send_discord(title, market, lines, color=3447003):
-    if not DISCORD_WEBHOOK_URL:
-        return
-
-    payload = {
-        "embeds": [{
-            "title": title,
-            "description": f"**Market:** {market}\n\n" + "\n".join(lines),
-            "color": color,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        }]
-    }
-
-    async with aiohttp.ClientSession() as session:
-        await session.post(DISCORD_WEBHOOK_URL, json=payload)
+def ts():
+    return time.strftime("%H:%M:%S")
 
 # ================== POLYMARKET ================== #
 
@@ -57,27 +42,44 @@ async def fetch_polymarket(session):
 
     try:
         async with session.get(POLYMARKET_URL, timeout=20) as resp:
-            print("Polymarket status:", resp.status)
+            print(f"[{ts()}] Polymarket status:", resp.status)
 
             if resp.status != 200:
                 return []
 
             payload = await resp.json()
 
-        # Handle BOTH possible formats safely
+        print(f"[{ts()}] Polymarket payload type:", type(payload))
+
+        # Defensive parsing
         if isinstance(payload, list):
             data = payload
         elif isinstance(payload, dict):
-            data = payload.get("data", [])
+            if "data" in payload:
+                data = payload["data"]
+            elif "markets" in payload:
+                data = payload["markets"]
+            else:
+                print(f"[{ts()}] Polymarket unknown keys:", payload.keys())
+                return []
         else:
-            print("Unknown Polymarket format:", type(payload))
+            print(f"[{ts()}] Unknown Polymarket format")
             return []
 
-        for m in data:
+        print(f"[{ts()}] Polymarket raw count:", len(data))
 
-            liquidity = safe_float(m.get("liquidity"))
+        for m in data:
+            liquidity = safe_float(
+                m.get("liquidity")
+                or m.get("liquidityNum")
+            )
+
+            prices = (
+                m.get("outcomePrices")
+                or m.get("outcome_prices")
+            )
+
             question = m.get("question")
-            prices = m.get("outcomePrices")
 
             if not prices or len(prices) != 2:
                 continue
@@ -96,7 +98,7 @@ async def fetch_polymarket(session):
             })
 
     except Exception as e:
-        print("Polymarket error:", e)
+        print(f"[{ts()}] Polymarket error:", e)
 
     return markets
 
@@ -106,7 +108,7 @@ async def fetch_kalshi(session):
     markets = []
 
     if not KALSHI_API_KEY or not KALSHI_API_SECRET:
-        print("Kalshi keys not set — skipping")
+        print(f"[{ts()}] Kalshi keys not set — skipping")
         return []
 
     path = "/markets"
@@ -116,7 +118,7 @@ async def fetch_kalshi(session):
         timestamp = str(int(time.time() * 1000))
         message = f"{timestamp}GET{path}"
 
-        secret = base64.b64decode(KALSHI_API_SECRET.strip().encode("ascii"))
+        secret = base64.b64decode(KALSHI_API_SECRET.strip())
         signature = hmac.new(
             secret,
             message.encode("utf-8"),
@@ -130,13 +132,17 @@ async def fetch_kalshi(session):
         }
 
         async with session.get(url, headers=headers, params={"limit": 200}, timeout=20) as resp:
+            print(f"[{ts()}] Kalshi status:", resp.status)
+
             if resp.status != 200:
-                print("Kalshi HTTP error:", resp.status)
                 return []
 
             payload = await resp.json()
 
-        for m in payload.get("markets", []):
+        raw = payload.get("markets", [])
+        print(f"[{ts()}] Kalshi raw count:", len(raw))
+
+        for m in raw:
             liquidity = safe_float(m.get("liquidity"))
             yes_bid = safe_float(m.get("yes_bid"))
 
@@ -152,7 +158,7 @@ async def fetch_kalshi(session):
             })
 
     except Exception as e:
-        print("Kalshi error:", e)
+        print(f"[{ts()}] Kalshi error:", e)
 
     return markets
 
@@ -163,11 +169,14 @@ async def fetch_manifold(session):
 
     try:
         async with session.get(f"{MANIFOLD_URL}?limit=200", timeout=20) as resp:
+            print(f"[{ts()}] Manifold status:", resp.status)
+
             if resp.status != 200:
-                print("Manifold HTTP error:", resp.status)
                 return []
 
             payload = await resp.json()
+
+        print(f"[{ts()}] Manifold raw count:", len(payload))
 
         for m in payload:
             if m.get("isResolved"):
@@ -188,7 +197,7 @@ async def fetch_manifold(session):
             })
 
     except Exception as e:
-        print("Manifold error:", e)
+        print(f"[{ts()}] Manifold error:", e)
 
     return markets
 
@@ -196,23 +205,32 @@ async def fetch_manifold(session):
 
 async def market_loop():
     await client.wait_until_ready()
+    print(f"[{ts()}] Market loop started")
 
     async with aiohttp.ClientSession() as session:
-        while True:
+        while not client.is_closed():
             try:
                 poly = await fetch_polymarket(session)
                 kalshi = await fetch_kalshi(session)
                 manifold = await fetch_manifold(session)
 
                 print(
-                    f"[Markets] "
+                    f"[{ts()}] "
                     f"Poly: {len(poly)} | "
                     f"Kalshi: {len(kalshi)} | "
                     f"Manifold: {len(manifold)}"
                 )
 
+                # Debug if something is zero
+                if len(poly) == 0:
+                    print(f"[{ts()}] WARNING: Polymarket returned 0 parsed markets")
+                if len(kalshi) == 0 and KALSHI_API_KEY:
+                    print(f"[{ts()}] WARNING: Kalshi returned 0 parsed markets")
+                if len(manifold) == 0:
+                    print(f"[{ts()}] WARNING: Manifold returned 0 parsed markets")
+
             except Exception as e:
-                print("Main loop error:", e)
+                print(f"[{ts()}] Main loop error:", e)
 
             await asyncio.sleep(FETCH_INTERVAL)
 
@@ -220,7 +238,7 @@ async def market_loop():
 
 @client.event
 async def on_ready():
-    print(f"Logged in as {client.user}")
+    print(f"[{ts()}] Logged in as {client.user}")
     client.loop.create_task(market_loop())
 
 # ================== START ================== #
@@ -229,6 +247,8 @@ if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN not set")
 
 client.run(DISCORD_TOKEN)
+
+
 
 
 
