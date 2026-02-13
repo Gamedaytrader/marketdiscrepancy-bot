@@ -149,12 +149,12 @@ async def polymarket_websocket():
     """Connect to Polymarket WebSocket for real-time updates"""
     
     try:
-        async with websockets.connect(POLYMARKET_WS_URL, timeout=20) as websocket:
+        async with websockets.connect(POLYMARKET_WS_URL) as websocket:
             logger.info("Connected to Polymarket WebSocket")
             
             while not client.is_closed():
                 try:
-                    message = await websocket.recv()
+                    message = await asyncio.wait_for(websocket.recv(), timeout=20)
                     data = json.loads(message)
                     logger.info(f"Polymarket live update: {data}")
                 except asyncio.TimeoutError:
