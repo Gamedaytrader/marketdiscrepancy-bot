@@ -58,8 +58,50 @@ async def send_discord(title, market, lines, color):
         await session.post(DISCORD_WEBHOOK_URL, json=payload)
 
 # ================== POLYMARKET ================== #
-async def fetch_polymarket_markets(session): try: async with session.get(POLYMARKET_URL, timeout=10) as resp: resp.raise_for_status() payload = await resp.json() return payload.get("data", []) except Exception as e: print(f"[Polymarket] Fetch error: {e}") return [] def extract_binary_yes_prob(market): outcomes = market.get("outcomes", []) if len(outcomes) != 2: return None for outcome in outcomes: if outcome.get("name", "").upper() == "YES": bid = outcome.get("bestBid") ask = outcome.get("bestAsk") if bid is not None and ask is not None: return (bid + ask) / 2 return None
 
+async def fetch_polymarket(session):
+    markets = []
+
+    try:
+        async with session.get(POLYMARKET_URL, timeout=15) as resp:
+            payload = await resp.json()
+
+        # Handle both response shapes
+        if isinstance(payload, dict):
+            data = payload.get("data", [])
+        elif isinstance(payload, list):
+            data = payload
+        else:
+            print("Polymarket unknown structure:", type(payload))
+            return []
+
+        for m in data:
+            liquidity = safe_float(m.get("liquidity"))
+            question = m.get("question")
+
+            outcomes = m.get("outcomes", [])
+            yes_prob = None
+
+            for o in outcomes:
+                if o.get("name", "").upper() == "YES":
+                    bid = safe_float(o.get("bestBid"))
+                    ask = safe_float(o.get("bestAsk"))
+                    if bid is not None and ask is not None:
+                        yes_prob = (bid + ask) / 2
+
+            if liquidity is not None and yes_prob is not None:
+                markets.append({
+                    "key": f"poly|{m.get('id')}",
+                    "platform": "Polymarket",
+                    "question": question,
+                    "liquidity": liquidity,
+                    "prob": yes_prob
+                })
+
+    except Exception as e:
+        print("Polymarket error:", e)
+
+    return markets
 
 # ================== KALSHI ================== #
 
@@ -184,6 +226,7 @@ async def on_ready():
     client.loop.create_task(market_loop())
 
 client.run(DISCORD_TOKEN)
+
 
 
 
