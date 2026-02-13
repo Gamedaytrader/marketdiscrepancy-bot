@@ -50,7 +50,7 @@ async def send_discord(title, market, lines, color=3447003):
     async with aiohttp.ClientSession() as session:
         await session.post(DISCORD_WEBHOOK_URL, json=payload)
 
-# ================== POLYMARKET (GAMMA - FIXED) ================== #
+# ================== POLYMARKET ================== #
 
 async def fetch_polymarket(session):
     markets = []
@@ -62,19 +62,21 @@ async def fetch_polymarket(session):
             if resp.status != 200:
                 return []
 
-            data = await resp.json()
+            payload = await resp.json()
 
-        # Gamma now returns a LIST directly
-        if not isinstance(data, list):
-            print("Unexpected Polymarket response type:", type(data))
-            print("Sample:", str(data)[:300])
+        # Handle BOTH possible formats safely
+        if isinstance(payload, list):
+            data = payload
+        elif isinstance(payload, dict):
+            data = payload.get("data", [])
+        else:
+            print("Unknown Polymarket format:", type(payload))
             return []
 
         for m in data:
 
             liquidity = safe_float(m.get("liquidity"))
             question = m.get("question")
-
             prices = m.get("outcomePrices")
 
             if not prices or len(prices) != 2:
