@@ -69,13 +69,18 @@ async def fetch_polymarket(session):
             elif "markets" in payload:
                 data = payload["markets"]
             else:
-                logger.info(f"Polymarket unknown keys: {payload.keys()}")
+                logger.info(f"Polymarket unknown keys: {list(payload.keys())}")
                 return []
         else:
             logger.info("Unknown Polymarket format")
             return []
 
         logger.info(f"Polymarket raw count: {len(data)}")
+        
+        # DEBUG: log first item to see actual structure
+        if len(data) > 0:
+            logger.info(f"Polymarket first item keys: {list(data[0].keys())}")
+            logger.info(f"Polymarket first item: {data[0]}")
 
         for m in data:
             liquidity = safe_float(
@@ -89,13 +94,24 @@ async def fetch_polymarket(session):
             )
 
             question = m.get("question")
-
-            if not prices or len(prices) != 2:
+            
+            # DEBUG: log why items are being skipped
+            if not prices:
+                logger.debug(f"Skipping market: no prices field")
+                continue
+            
+            if len(prices) != 2:
+                logger.debug(f"Skipping market: prices length {len(prices)} != 2, prices: {prices}")
                 continue
 
             yes_price = safe_float(prices[0])
 
-            if liquidity is None or yes_price is None:
+            if liquidity is None:
+                logger.debug(f"Skipping market: liquidity is None")
+                continue
+                
+            if yes_price is None:
+                logger.debug(f"Skipping market: yes_price is None, prices[0]: {prices[0]}")
                 continue
 
             markets.append({
@@ -107,7 +123,7 @@ async def fetch_polymarket(session):
             })
 
     except Exception as e:
-        logger.error(f"Polymarket error: {e}")
+        logger.error(f"Polymarket error: {e}", exc_info=True)
 
     return markets
 
