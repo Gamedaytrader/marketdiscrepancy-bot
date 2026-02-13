@@ -66,12 +66,12 @@ async def fetch_polymarket(session):
         async with session.get(POLYMARKET_URL, timeout=15) as resp:
             payload = await resp.json()
 
+        # Gamma API returns a list
         if not isinstance(payload, list):
-            print("Unexpected Poly structure:", type(payload))
+            print("Unexpected Polymarket structure:", type(payload))
             return []
 
         for m in payload:
-
             if not m.get("active"):
                 continue
 
@@ -95,6 +95,7 @@ async def fetch_polymarket(session):
         print("Polymarket error:", e)
 
     return markets
+
 
 
 
