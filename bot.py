@@ -50,30 +50,34 @@ async def send_discord(title, market, lines, color=3447003):
     async with aiohttp.ClientSession() as session:
         await session.post(DISCORD_WEBHOOK_URL, json=payload)
 
-# ================== POLYMARKET (GAMMA) ================== #
+# ================== POLYMARKET (GAMMA - FIXED) ================== #
 
 async def fetch_polymarket(session):
     markets = []
 
     try:
         async with session.get(POLYMARKET_URL, timeout=20) as resp:
+            print("Polymarket status:", resp.status)
+
             if resp.status != 200:
-                print("Polymarket HTTP error:", resp.status)
                 return []
 
-            payload = await resp.json()
+            data = await resp.json()
 
-        # Gamma returns dict with "data"
-        data = payload.get("data", [])
+        # Gamma now returns a LIST directly
+        if not isinstance(data, list):
+            print("Unexpected Polymarket response type:", type(data))
+            print("Sample:", str(data)[:300])
+            return []
 
         for m in data:
 
             liquidity = safe_float(m.get("liquidity"))
             question = m.get("question")
 
-            prices = m.get("outcomePrices", [])
+            prices = m.get("outcomePrices")
 
-            if len(prices) != 2:
+            if not prices or len(prices) != 2:
                 continue
 
             yes_price = safe_float(prices[0])
@@ -223,6 +227,7 @@ if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN not set")
 
 client.run(DISCORD_TOKEN)
+
 
 
 
