@@ -8,6 +8,8 @@ import hashlib
 import base64
 import logging
 import sys
+import websockets
+import json
 
 # ================== LOGGING CONFIG ================== #
 
@@ -25,10 +27,11 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 POLYMARKET_URL = "https://gamma-api.polymarket.com/markets?limit=500&active=true"
+POLYMARKET_WS_URL = "wss://ws-mainnet-1.polymarket.com/ws"
 KALSHI_BASE_URL = "https://api.kalshi.com/trade-api/v2"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
-FETCH_INTERVAL = 120
+FETCH_INTERVAL = 30  # Fetch every 30 seconds for more live data
 
 KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY")
 KALSHI_API_SECRET = os.environ.get("KALSHI_API_SECRET")
@@ -126,6 +129,32 @@ async def fetch_polymarket(session):
         logger.error(f"Polymarket error: {e}", exc_info=True)
 
     return markets
+
+# ================== POLYMARKET WEBSOCKET ================== #
+
+async def polymarket_websocket():
+    """Connect to Polymarket WebSocket for real-time updates"""
+    
+    try:
+        async with websockets.connect(POLYMARKET_WS_URL, timeout=20) as websocket:
+            logger.info("Connected to Polymarket WebSocket")
+            
+            while not client.is_closed():
+                try:
+                    message = await websocket.recv()
+                    data = json.loads(message)
+                    logger.info(f"Polymarket live update: {data}")
+                except asyncio.TimeoutError:
+                    logger.warning("WebSocket timeout, reconnecting...")
+                    break
+                except Exception as e:
+                    logger.error(f"WebSocket error: {e}")
+                    break
+    except Exception as e:
+        logger.error(f"Polymarket WebSocket connection error: {e}")
+    
+    # Reconnect after delay
+    await asyncio.sleep(5)
 
 # ================== KALSHI ================== #
 
@@ -264,6 +293,7 @@ async def market_loop():
 async def on_ready():
     logger.info(f"Logged in as {client.user}")
     client.loop.create_task(market_loop())
+    client.loop.create_task(polymarket_websocket())
 
 # ================== START ================== #
 
