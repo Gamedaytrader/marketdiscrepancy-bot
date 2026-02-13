@@ -58,48 +58,7 @@ async def send_discord(title, market, lines, color):
         await session.post(DISCORD_WEBHOOK_URL, json=payload)
 
 # ================== POLYMARKET ================== #
-
-async def fetch_polymarket(session):
-    markets = []
-
-    try:
-        async with session.get("https://clob.polymarket.com/markets?limit=500", timeout=15) as resp:
-            payload = await resp.json()
-
-        data = payload.get("data", [])
-
-        for m in data:
-
-            # Only active + open markets
-            if not m.get("active"):
-                continue
-
-            if m.get("closed"):
-                continue
-
-            question = m.get("question")
-            liquidity = safe_float(m.get("liquidity"))
-
-            outcomes = m.get("outcomes", [])
-            if len(outcomes) < 2:
-                continue
-
-            # Use price instead of bid/ask
-            yes_price = safe_float(outcomes[0].get("price"))
-
-            if liquidity is not None and yes_price is not None:
-                markets.append({
-                    "key": f"poly|{m.get('condition_id')}",
-                    "platform": "Polymarket",
-                    "question": question,
-                    "liquidity": liquidity,
-                    "prob": yes_price
-                })
-
-    except Exception as e:
-        print("Polymarket error:", e)
-
-    return markets
+async def fetch_polymarket_markets(session): try: async with session.get(POLYMARKET_URL, timeout=10) as resp: resp.raise_for_status() payload = await resp.json() return payload.get("data", []) except Exception as e: print(f"[Polymarket] Fetch error: {e}") return [] def extract_binary_yes_prob(market): outcomes = market.get("outcomes", []) if len(outcomes) != 2: return None for outcome in outcomes: if outcome.get("name", "").upper() == "YES": bid = outcome.get("bestBid") ask = outcome.get("bestAsk") if bid is not None and ask is not None: return (bid + ask) / 2 return None
 
 
 # ================== KALSHI ================== #
