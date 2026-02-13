@@ -12,27 +12,17 @@ import base64
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-POLYMARKET_URL = "https://gamma-api.polymarket.com/markets?limit=500&active=true"
+POLYMARKET_URL = "https://clob.polymarket.com/markets?limit=500"
 KALSHI_BASE_URL = "https://api.kalshi.com/trade-api/v2"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
 FETCH_INTERVAL = 120
-
-ALERT_THRESHOLD = 500
-WHALE_THRESHOLD = 20_000
-WINDOW_SIZE = 5
 
 KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY")
 KALSHI_API_SECRET = os.environ.get("KALSHI_API_SECRET")
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
-
-# ================== STATE ================== #
-
-market_cache = {}
-liquidity_windows = {}
-open_setups = {}
 
 # ================== UTIL ================== #
 
@@ -44,7 +34,10 @@ def safe_float(v):
 
 # ================== DISCORD ================== #
 
-async def send_discord(title, market, lines, color):
+async def send_discord(title, market, lines, color=3447003):
+    if not DISCORD_WEBHOOK_URL:
+        return
+
     payload = {
         "embeds": [{
             "title": title,
@@ -63,15 +56,19 @@ async def fetch_polymarket(session):
     markets = []
 
     try:
-        async with session.get(POLYMARKET_URL, timeout=15) as resp:
-            payload = await resp.json()
+        async with session.get(POLYMARKET_URL, timeout=20) as resp:
+            if resp.status != 200:
+                print("Polymarket HTTP error:", resp.status)
+                return []
 
-        # Gamma API returns a list
-        if not isinstance(payload, list):
-            print("Unexpected Polymarket structure:", type(payload))
+            data = await resp.json()  # CLOB returns list directly
+
+        if not isinstance(data, list):
+            print("Unexpected Polymarket format")
             return []
 
-        for m in payload:
+        for m in data:
+
             if not m.get("active"):
                 continue
 
@@ -79,25 +76,29 @@ async def fetch_polymarket(session):
                 continue
 
             liquidity = safe_float(m.get("liquidity"))
-            prob = safe_float(m.get("probability"))
             question = m.get("question")
 
-            if liquidity is not None and prob is not None:
-                markets.append({
-                    "key": f"poly|{m.get('id')}",
-                    "platform": "Polymarket",
-                    "question": question,
-                    "liquidity": liquidity,
-                    "prob": prob
-                })
+            tokens = m.get("tokens", [])
+            if len(tokens) != 2:
+                continue
+
+            yes_price = safe_float(tokens[0].get("price"))
+
+            if liquidity is None or yes_price is None:
+                continue
+
+            markets.append({
+                "key": f"poly|{m.get('condition_id')}",
+                "platform": "Polymarket",
+                "question": question,
+                "liquidity": liquidity,
+                "prob": yes_price
+            })
 
     except Exception as e:
         print("Polymarket error:", e)
 
     return markets
-
-
-
 
 # ================== KALSHI ================== #
 
@@ -105,6 +106,7 @@ async def fetch_kalshi(session):
     markets = []
 
     if not KALSHI_API_KEY or not KALSHI_API_SECRET:
+        print("Kalshi keys not set — skipping")
         return []
 
     path = "/markets"
@@ -127,7 +129,7 @@ async def fetch_kalshi(session):
             "KALSHI-ACCESS-TIMESTAMP": timestamp
         }
 
-        async with session.get(url, headers=headers, params={"limit": 200}) as resp:
+        async with session.get(url, headers=headers, params={"limit": 200}, timeout=20) as resp:
             if resp.status != 200:
                 print("Kalshi HTTP error:", resp.status)
                 return []
@@ -138,18 +140,19 @@ async def fetch_kalshi(session):
             liquidity = safe_float(m.get("liquidity"))
             yes_bid = safe_float(m.get("yes_bid"))
 
-            if liquidity is not None and yes_bid is not None:
-                markets.append({
-                    "key": f"kalshi|{m.get('ticker')}",
-                    "platform": "Kalshi",
-                    "question": m.get("title"),
-                    "liquidity": liquidity,
-                    "prob": yes_bid / 100
-                })
+            if liquidity is None or yes_bid is None:
+                continue
+
+            markets.append({
+                "key": f"kalshi|{m.get('ticker')}",
+                "platform": "Kalshi",
+                "question": m.get("title"),
+                "liquidity": liquidity,
+                "prob": yes_bid / 100
+            })
 
     except Exception as e:
-        print("Kalshi disabled (network issue):", e)
-        return []
+        print("Kalshi error:", e)
 
     return markets
 
@@ -159,7 +162,11 @@ async def fetch_manifold(session):
     markets = []
 
     try:
-        async with session.get(f"{MANIFOLD_URL}?limit=200", timeout=15) as resp:
+        async with session.get(f"{MANIFOLD_URL}?limit=200", timeout=20) as resp:
+            if resp.status != 200:
+                print("Manifold HTTP error:", resp.status)
+                return []
+
             payload = await resp.json()
 
         for m in payload:
@@ -169,30 +176,21 @@ async def fetch_manifold(session):
             liquidity = safe_float(m.get("volume24Hours"))
             prob = safe_float(m.get("probability"))
 
-            if liquidity is not None and prob is not None:
-                markets.append({
-                    "key": f"manifold|{m.get('id')}",
-                    "platform": "Manifold",
-                    "question": m.get("question"),
-                    "liquidity": liquidity,
-                    "prob": prob
-                })
+            if liquidity is None or prob is None:
+                continue
+
+            markets.append({
+                "key": f"manifold|{m.get('id')}",
+                "platform": "Manifold",
+                "question": m.get("question"),
+                "liquidity": liquidity,
+                "prob": prob
+            })
 
     except Exception as e:
         print("Manifold error:", e)
 
     return markets
-
-# ================== LIQUIDITY ================== #
-
-def track_liquidity(key, delta):
-    window = liquidity_windows.setdefault(key, [])
-    window.append(delta)
-    if len(window) > WINDOW_SIZE:
-        window.pop(0)
-
-def net_liquidity(key):
-    return sum(liquidity_windows.get(key, []))
 
 # ================== MAIN LOOP ================== #
 
@@ -201,28 +199,36 @@ async def market_loop():
 
     async with aiohttp.ClientSession() as session:
         while True:
-            poly = await fetch_polymarket(session)
-            kalshi = await fetch_kalshi(session)
-            manifold = await fetch_manifold(session)
+            try:
+                poly = await fetch_polymarket(session)
+                kalshi = await fetch_kalshi(session)
+                manifold = await fetch_manifold(session)
 
-            print(
-                f"[Markets] "
-                f"Poly: {len(poly)} | "
-                f"Kalshi: {len(kalshi)} | "
-                f"Manifold: {len(manifold)}"
-            )
+                print(
+                    f"[Markets] "
+                    f"Poly: {len(poly)} | "
+                    f"Kalshi: {len(kalshi)} | "
+                    f"Manifold: {len(manifold)}"
+                )
+
+            except Exception as e:
+                print("Main loop error:", e)
 
             await asyncio.sleep(FETCH_INTERVAL)
 
-# ================== DISCORD ================== #
+# ================== DISCORD EVENTS ================== #
 
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
     client.loop.create_task(market_loop())
 
-client.run(DISCORD_TOKEN)
+# ================== START ================== #
 
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN not set")
+
+client.run(DISCORD_TOKEN)
 
 
 
