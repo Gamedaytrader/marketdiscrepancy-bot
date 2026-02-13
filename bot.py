@@ -12,7 +12,7 @@ import base64
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-POLYMARKET_URL = "https://clob.polymarket.com/markets?limit=500"
+POLYMARKET_URL = "https://gamma-api.polymarket.com/markets?limit=500&active=true"
 KALSHI_BASE_URL = "https://api.kalshi.com/trade-api/v2"
 MANIFOLD_URL = "https://api.manifold.markets/v0/markets"
 
@@ -50,7 +50,7 @@ async def send_discord(title, market, lines, color=3447003):
     async with aiohttp.ClientSession() as session:
         await session.post(DISCORD_WEBHOOK_URL, json=payload)
 
-# ================== POLYMARKET ================== #
+# ================== POLYMARKET (GAMMA) ================== #
 
 async def fetch_polymarket(session):
     markets = []
@@ -61,34 +61,28 @@ async def fetch_polymarket(session):
                 print("Polymarket HTTP error:", resp.status)
                 return []
 
-            data = await resp.json()  # CLOB returns list directly
+            payload = await resp.json()
 
-        if not isinstance(data, list):
-            print("Unexpected Polymarket format")
-            return []
+        # Gamma returns dict with "data"
+        data = payload.get("data", [])
 
         for m in data:
-
-            if not m.get("active"):
-                continue
-
-            if m.get("closed"):
-                continue
 
             liquidity = safe_float(m.get("liquidity"))
             question = m.get("question")
 
-            tokens = m.get("tokens", [])
-            if len(tokens) != 2:
+            prices = m.get("outcomePrices", [])
+
+            if len(prices) != 2:
                 continue
 
-            yes_price = safe_float(tokens[0].get("price"))
+            yes_price = safe_float(prices[0])
 
             if liquidity is None or yes_price is None:
                 continue
 
             markets.append({
-                "key": f"poly|{m.get('condition_id')}",
+                "key": f"poly|{m.get('id')}",
                 "platform": "Polymarket",
                 "question": question,
                 "liquidity": liquidity,
