@@ -63,17 +63,15 @@ async def fetch_polymarket(session):
     markets = []
 
     try:
-        async with session.get(
-            "https://clob.polymarket.com/markets?limit=500",
-            timeout=15
-        ) as resp:
+        async with session.get(POLYMARKET_URL, timeout=15) as resp:
             payload = await resp.json()
 
-        data = payload.get("data", [])
+        if not isinstance(payload, list):
+            print("Unexpected Poly structure:", type(payload))
+            return []
 
-        for m in data:
+        for m in payload:
 
-            # Only open markets
             if not m.get("active"):
                 continue
 
@@ -81,28 +79,23 @@ async def fetch_polymarket(session):
                 continue
 
             liquidity = safe_float(m.get("liquidity"))
+            prob = safe_float(m.get("probability"))
             question = m.get("question")
 
-            tokens = m.get("tokens", [])
-            if len(tokens) != 2:
-                continue
-
-            # YES = first token probability (0-1)
-            yes_price = safe_float(tokens[0].get("price"))
-
-            if liquidity is not None and yes_price is not None:
+            if liquidity is not None and prob is not None:
                 markets.append({
-                    "key": f"poly|{m.get('condition_id')}",
+                    "key": f"poly|{m.get('id')}",
                     "platform": "Polymarket",
                     "question": question,
                     "liquidity": liquidity,
-                    "prob": yes_price
+                    "prob": prob
                 })
 
     except Exception as e:
         print("Polymarket error:", e)
 
     return markets
+
 
 
 # ================== KALSHI ================== #
